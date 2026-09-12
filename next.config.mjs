@@ -11,15 +11,13 @@
 // SameSite=Lax keeps working, and nothing needs to move to localStorage or
 // relax SameSite/Secure. Locally this proxies to the local backend, so
 // `next dev` needs no extra setup.
-const BACKEND_API_URL =
-  process.env.BACKEND_API_URL || "http://localhost:8000/api/v1";
-
 const nextConfig = {
   async rewrites() {
     return [
       {
         source: "/api/v1/:path*",
-        destination: `${BACKEND_API_URL}/:path*`,
+        destination:
+          "https://lal-motors-backend.vercel.app/api/v1/:path*",
       },
     ];
   },
