@@ -11,16 +11,20 @@ import {
   ShieldCheck,
   X,
 } from "lucide-react";
+import { keepPreviousData, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   FormEvent,
-  useCallback,
   useEffect,
   useMemo,
   useState,
 } from "react";
 
+import { RequirePermission } from "@/components/RequirePermission";
 import { StatusBadge } from "@/components/RealUi";
-import { ApiError, CurrentUser, apiFetch, getCurrentUser } from "@/lib/api";
+import { apiFetch } from "@/lib/api";
+import { invalidate } from "@/lib/invalidate";
+import { useCurrentUser } from "@/lib/hooks/useCurrentUser";
+import { queryKeys } from "@/lib/queryKeys";
 
 type InventoryRow = {
   business_unit_id: string;
@@ -128,17 +132,14 @@ function stockStatus(row: InventoryRow): string {
   return "in_stock";
 }
 
-export default function InventoryPage() {
-  const [rows, setRows] = useState<InventoryRow[]>([]);
-  const [valuations, setValuations] = useState<Valuation[]>([]);
-  const [items, setItems] = useState<ItemLookup[]>([]);
-  const [locations, setLocations] = useState<Location[]>([]);
-  const [movements, setMovements] = useState<Movement[]>([]);
-  const [user, setUser] = useState<CurrentUser | null>(null);
+function InventoryPage() {
+  const queryClient = useQueryClient();
+  const { data: user } = useCurrentUser();
 
   const [search, setSearch] = useState("");
   const [typeFilter, setTypeFilter] = useState("");
   const [locationFilter, setLocationFilter] = useState("");
+  const [debouncedSearch, setDebouncedSearch] = useState("");
 
   const [operation, setOperation] = useState<Operation>(null);
   const [selectedItem, setSelectedItem] = useState("");
@@ -149,8 +150,6 @@ export default function InventoryPage() {
   const [unitCost, setUnitCost] = useState("");
   const [reason, setReason] = useState("");
 
-  const [loading, setLoading] = useState(true);
-  const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
   const [success, setSuccess] = useState("");
 
@@ -161,62 +160,137 @@ export default function InventoryPage() {
     return roles.has("manager") || roles.has("administrator");
   }, [user]);
 
-  const loadInventory = useCallback(async () => {
-    setLoading(true);
-    setError("");
-
-    try {
-      const params = new URLSearchParams();
-      if (search.trim()) params.set("search", search.trim());
-      if (typeFilter) params.set("item_type", typeFilter);
-      if (locationFilter) params.set("location_id", locationFilter);
-      params.set("limit", "300");
-
-      const result = await apiFetch<InventoryList>(
-        `/inventory?${params.toString()}`,
-      );
-      setRows(result.items);
-    } catch (err: any) {
-      setError(err?.message || "Unable to load inventory.");
-    } finally {
-      setLoading(false);
-    }
-  }, [search, typeFilter, locationFilter]);
-
-  async function loadSupporting() {
-    try {
-      const [
-        valuationData,
-        itemData,
-        locationData,
-        movementData,
-        currentUser,
-      ] = await Promise.all([
-        apiFetch<Valuation[]>("/inventory/valuation"),
-        apiFetch<ItemLookup[]>("/inventory/lookups/items?limit=300"),
-        apiFetch<Location[]>("/inventory/locations"),
-        apiFetch<MovementList>("/inventory/movements?limit=30"),
-        getCurrentUser(),
-      ]);
-
-      setValuations(valuationData);
-      setItems(itemData);
-      setLocations(locationData);
-      setMovements(movementData.items);
-      setUser(currentUser);
-    } catch (err: any) {
-      setError(err?.message || "Unable to load inventory supporting data.");
-    }
-  }
-
   useEffect(() => {
-    loadSupporting();
-  }, []);
-
-  useEffect(() => {
-    const timer = window.setTimeout(loadInventory, 250);
+    const timer = window.setTimeout(() => setDebouncedSearch(search), 250);
     return () => window.clearTimeout(timer);
-  }, [loadInventory]);
+  }, [search]);
+
+  const listParams = useMemo(
+    () => ({
+      search: debouncedSearch.trim() || undefined,
+      item_type: typeFilter || undefined,
+      location_id: locationFilter || undefined,
+    }),
+    [debouncedSearch, typeFilter, locationFilter],
+  );
+
+  const inventoryQuery = useQuery({
+    queryKey: queryKeys.inventory.list(listParams),
+    queryFn: () => {
+      const params = new URLSearchParams();
+      if (listParams.search) params.set("search", listParams.search);
+      if (listParams.item_type) params.set("item_type", listParams.item_type);
+      if (listParams.location_id) params.set("location_id", listParams.location_id);
+      params.set("limit", "300");
+      return apiFetch<InventoryList>(`/inventory?${params.toString()}`);
+    },
+    staleTime: 2 * 60 * 1000,
+    gcTime: 10 * 60 * 1000,
+    placeholderData: keepPreviousData,
+  });
+  const rows = inventoryQuery.data?.items ?? [];
+  const loading = inventoryQuery.isLoading;
+
+  const valuationQuery = useQuery({
+    queryKey: queryKeys.inventory.valuation(),
+    queryFn: () => apiFetch<Valuation[]>("/inventory/valuation"),
+    staleTime: 2 * 60 * 1000,
+  });
+  const valuations = valuationQuery.data ?? [];
+
+  const itemsQuery = useQuery({
+    queryKey: queryKeys.inventory.itemLookup(),
+    queryFn: () => apiFetch<ItemLookup[]>("/inventory/lookups/items?limit=300"),
+    staleTime: 5 * 60 * 1000,
+  });
+  const items = itemsQuery.data ?? [];
+
+  const locationsQuery = useQuery({
+    queryKey: queryKeys.inventory.locations(),
+    queryFn: () => apiFetch<Location[]>("/inventory/locations"),
+    staleTime: 5 * 60 * 1000,
+  });
+  const locations = locationsQuery.data ?? [];
+
+  const movementsQuery = useQuery({
+    queryKey: queryKeys.inventory.movements({ limit: 30 }),
+    queryFn: () => apiFetch<MovementList>("/inventory/movements?limit=30"),
+    staleTime: 60 * 1000,
+  });
+  const movements = movementsQuery.data?.items ?? [];
+
+  const refreshAll = () =>
+    Promise.all([
+      inventoryQuery.refetch(),
+      valuationQuery.refetch(),
+      itemsQuery.refetch(),
+      locationsQuery.refetch(),
+      movementsQuery.refetch(),
+    ]);
+
+  const operationMutation = useMutation({
+    mutationFn: async (op: Operation) => {
+      if (op === "transfer") {
+        await apiFetch("/inventory/transfer", {
+          method: "POST",
+          body: JSON.stringify({
+            item_id: selectedItem,
+            from_location_id: fromLocation,
+            to_location_id: toLocation,
+            quantity: Number(quantity),
+            reference_type: "dashboard",
+            notes: "Transferred from Lal Motors dashboard",
+          }),
+        });
+      }
+
+      if (op === "reserve" || op === "release") {
+        await apiFetch(`/inventory/${op}`, {
+          method: "POST",
+          body: JSON.stringify({
+            item_id: selectedItem,
+            storage_location_id: fromLocation,
+            quantity: Number(quantity),
+            reference_type: "dashboard",
+            notes: `${labelize(op)} from Lal Motors dashboard`,
+          }),
+        });
+      }
+
+      if (op === "adjust") {
+        await apiFetch("/inventory/adjust", {
+          method: "POST",
+          body: JSON.stringify({
+            item_id: selectedItem,
+            storage_location_id: fromLocation,
+            new_quantity_on_hand: Number(newQuantity),
+            unit_cost: unitCost.trim() === "" ? null : Number(unitCost),
+            reason,
+          }),
+        });
+      }
+    },
+    onSuccess: (_data, op) => {
+      setSuccess(`${labelize(op as string)} completed successfully.`);
+      invalidate(queryClient, ["inventory", "vehicles", "newItems", "dashboard"]);
+      window.setTimeout(() => {
+        setOperation(null);
+        setSuccess("");
+      }, 650);
+    },
+    onError: (err: any) => {
+      setError(err?.message || "Inventory operation failed.");
+    },
+  });
+  const saving = operationMutation.isPending;
+
+  const loadError =
+    (inventoryQuery.isError && "Unable to load inventory.") ||
+    (valuationQuery.isError && "Unable to load inventory valuation.") ||
+    (itemsQuery.isError && "Unable to load item lookups.") ||
+    (locationsQuery.isError && "Unable to load locations.") ||
+    (movementsQuery.isError && "Unable to load inventory movements.") ||
+    "";
 
   const totalValue = valuations.reduce(
     (sum, row) => sum + Number(row.total_inventory_value || 0),
@@ -246,68 +320,12 @@ export default function InventoryPage() {
     setSuccess("");
   }
 
-  async function submitOperation(e: FormEvent) {
+  function submitOperation(e: FormEvent) {
     e.preventDefault();
     if (!operation) return;
-
-    setSaving(true);
     setError("");
     setSuccess("");
-
-    try {
-      if (operation === "transfer") {
-        await apiFetch("/inventory/transfer", {
-          method: "POST",
-          body: JSON.stringify({
-            item_id: selectedItem,
-            from_location_id: fromLocation,
-            to_location_id: toLocation,
-            quantity: Number(quantity),
-            reference_type: "dashboard",
-            notes: "Transferred from Lal Motors dashboard",
-          }),
-        });
-      }
-
-      if (operation === "reserve" || operation === "release") {
-        await apiFetch(`/inventory/${operation}`, {
-          method: "POST",
-          body: JSON.stringify({
-            item_id: selectedItem,
-            storage_location_id: fromLocation,
-            quantity: Number(quantity),
-            reference_type: "dashboard",
-            notes: `${labelize(operation)} from Lal Motors dashboard`,
-          }),
-        });
-      }
-
-      if (operation === "adjust") {
-        await apiFetch("/inventory/adjust", {
-          method: "POST",
-          body: JSON.stringify({
-            item_id: selectedItem,
-            storage_location_id: fromLocation,
-            new_quantity_on_hand: Number(newQuantity),
-            unit_cost:
-              unitCost.trim() === "" ? null : Number(unitCost),
-            reason,
-          }),
-        });
-      }
-
-      setSuccess(`${labelize(operation)} completed successfully.`);
-      await Promise.all([loadInventory(), loadSupporting()]);
-
-      window.setTimeout(() => {
-        setOperation(null);
-        setSuccess("");
-      }, 650);
-    } catch (err: any) {
-      setError(err?.message || "Inventory operation failed.");
-    } finally {
-      setSaving(false);
-    }
+    operationMutation.mutate(operation);
   }
 
   return (
@@ -325,7 +343,7 @@ export default function InventoryPage() {
           <button
             className="btn btn-secondary"
             onClick={() =>
-              Promise.all([loadInventory(), loadSupporting()])
+              refreshAll()
             }
           >
             <RefreshCw size={15} /> Refresh
@@ -367,7 +385,7 @@ export default function InventoryPage() {
         />
       </div>
 
-      <Message error={error} success={success} />
+      <Message error={error || loadError} success={success} />
 
       <section className="records-section">
         <div className="records-toolbar card">
@@ -834,5 +852,13 @@ function Message({
     >
       {error || success}
     </div>
+  );
+}
+
+export default function Page() {
+  return (
+    <RequirePermission perm="inventory.view">
+      <InventoryPage />
+    </RequirePermission>
   );
 }

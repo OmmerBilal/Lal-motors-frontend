@@ -1,5 +1,14 @@
-import { ChannelListingsPage } from "@/components/ChannelListingsPage";
+import { ChannelBusinessModule } from "@/components/ChannelBusinessModule";
+import { RequirePermission } from "@/components/RequirePermission";
+
+function PageContent() {
+  return <ChannelBusinessModule provider="shopify" title="Shopify" />;
+}
 
 export default function Page() {
-  return <ChannelListingsPage provider="shopify" title="Shopify" description="Live database records for Shopify integration accounts and channel listings." />;
+  return (
+    <RequirePermission perm="shopify.view">
+      <PageContent />
+    </RequirePermission>
+  );
 }

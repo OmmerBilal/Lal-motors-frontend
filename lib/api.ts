@@ -25,7 +25,10 @@ export async function apiFetch<T>(
 ): Promise<T> {
   const headers = new Headers(options.headers);
 
-  if (options.body && !headers.has("Content-Type")) {
+  // A FormData body must keep the browser-generated multipart boundary in
+  // its Content-Type — forcing application/json here would silently break
+  // every file upload (the server would receive a mislabeled empty body).
+  if (options.body && !headers.has("Content-Type") && !(options.body instanceof FormData)) {
     headers.set("Content-Type", "application/json");
   }
 
@@ -65,16 +68,27 @@ export async function apiFetch<T>(
   return data as T;
 }
 
+export type EmployeeSummary = {
+  id: string;
+  employee_number: string | null;
+  display_name: string;
+  employment_type: string | null;
+  employment_status: string;
+};
+
 export type CurrentUser = {
   id: string;
   business_unit_id: string;
   email: string;
   display_name: string | null;
   status: string;
+  must_change_password: boolean;
   auth_provider: string | null;
   last_login_at: string | null;
   created_at: string;
   roles: string[];
+  permissions: string[];
+  employee: EmployeeSummary | null;
 };
 
 export async function getCurrentUser(): Promise<CurrentUser> {
@@ -83,4 +97,15 @@ export async function getCurrentUser(): Promise<CurrentUser> {
 
 export async function logout(): Promise<void> {
   await apiFetch("/auth/logout", { method: "POST" });
+}
+
+export async function changePassword(currentPassword: string, newPassword: string): Promise<void> {
+  await apiFetch("/auth/change-password", {
+    method: "POST",
+    body: JSON.stringify({ current_password: currentPassword, new_password: newPassword }),
+  });
+}
+
+export async function apiUpload<T>(path: string, formData: FormData): Promise<T> {
+  return apiFetch<T>(path, { method: "POST", body: formData });
 }

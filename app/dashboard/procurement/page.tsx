@@ -4,6 +4,7 @@ import { Eye, Pencil, Plus, RefreshCw, Trash2 } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 
 import { DetailGrid, EmptyRow, GlobalSpinStyle, Message, Modal, StatusBadge, labelize, money } from "@/components/RealUi";
+import { RequirePermission } from "@/components/RequirePermission";
 import { CurrentUser, apiFetch, getCurrentUser } from "@/lib/api";
 
 type Supplier={id:string;name:string};type Item={id:string;item_code:string;name:string};type POItem={id:string;purchase_order_id:string;po_number:string;item_id:string;item_name:string};type Employee={id:string;display_name:string};
@@ -16,7 +17,7 @@ type QC={id:string;inspection_number:string;inspection_date:string|null;inspecto
 type Comm={id:string;supplier_id:string;supplier_name:string;occurred_at:string;channel:string|null;subject:string|null;notes:string|null;created_by_user_id:string|null;created_at:string};
 type Tab="quotes"|"certifications"|"production"|"qc"|"communications";
 
-export default function ProcurementPage(){
+function ProcurementPage(){
  const [tab,setTab]=useState<Tab>("quotes");const [quotes,setQuotes]=useState<Quote[]>([]);const [certs,setCerts]=useState<Cert[]>([]);const [production,setProduction]=useState<Prod[]>([]);const [qc,setQc]=useState<QC[]>([]);const [communications,setCommunications]=useState<Comm[]>([]);const [suppliers,setSuppliers]=useState<Supplier[]>([]);const [items,setItems]=useState<Item[]>([]);const [poItems,setPoItems]=useState<POItem[]>([]);const [employees,setEmployees]=useState<Employee[]>([]);const [user,setUser]=useState<CurrentUser|null>(null);const [error,setError]=useState("");const [success,setSuccess]=useState("");const [selectedQuote,setSelectedQuote]=useState<Quote|null>(null);
  const isManager=useMemo(()=>{const r=new Set((user?.roles||[]).map(x=>x.toLowerCase()));return r.has("manager")||r.has("administrator")},[user]);
  async function load(){setError("");try{const [q,c,p,qi,co,s,i,po,e,u]=await Promise.all([apiFetch<QuoteList>("/procurement-ops/quotes"),apiFetch<Cert[]>("/procurement-ops/certifications"),apiFetch<Prod[]>("/procurement-ops/production-runs"),apiFetch<QC[]>("/procurement-ops/qc-inspections"),apiFetch<Comm[]>("/procurement-ops/communications"),apiFetch<Supplier[]>("/procurement-ops/lookups/suppliers"),apiFetch<Item[]>("/procurement-ops/lookups/items"),apiFetch<POItem[]>("/procurement-ops/lookups/purchase-order-items"),apiFetch<Employee[]>("/procurement-ops/lookups/employees"),getCurrentUser()]);setQuotes(q.items);setCerts(c);setProduction(p);setQc(qi);setCommunications(co);setSuppliers(s);setItems(i);setPoItems(po);setEmployees(e);setUser(u)}catch(e:any){setError(e?.message||"Unable to load procurement operations.")}}
@@ -46,4 +47,12 @@ export default function ProcurementPage(){
  {tab==="communications"&&<div className="table-wrap"><table><thead><tr><th>Supplier</th><th>Time</th><th>Channel</th><th>Subject</th><th>Notes</th><th>Actions</th></tr></thead><tbody>{communications.length===0?<EmptyRow columns={6}/>:communications.map(c=><tr key={c.id}><td>{c.supplier_name}</td><td>{new Date(c.occurred_at).toLocaleString()}</td><td>{c.channel||"—"}</td><td>{c.subject||"—"}</td><td>{c.notes||"—"}</td><td><div className="record-actions"><button className="record-action edit" onClick={()=>editComm(c)}><Pencil size={14}/></button><button className="record-action delete" onClick={()=>deleteComm(c)}><Trash2 size={14}/></button></div></td></tr>)}</tbody></table></div>}
  {selectedQuote&&<Modal title={selectedQuote.quote_number} eyebrow="Supplier Quote" onClose={()=>setSelectedQuote(null)} width={900}><DetailGrid rows={[["Supplier",selectedQuote.supplier_name],["Date",selectedQuote.quote_date||"—"],["Valid Until",selectedQuote.valid_until||"—"],["Status",<StatusBadge value={selectedQuote.status}/>],["Notes",selectedQuote.notes||"—"]]}/><div className="panel-head" style={{marginTop:22}}><h3>Quote Items</h3><button className="btn btn-secondary" onClick={addQuoteItem}><Plus size={14}/>Add Item</button></div><div className="table-wrap"><table><thead><tr><th>Item</th><th>MOQ</th><th>Quoted</th><th>Negotiated</th><th>Action</th></tr></thead><tbody>{selectedQuote.items.length===0?<EmptyRow columns={5}/>:selectedQuote.items.map(i=><tr key={i.id}><td>{i.item_code} — {i.item_name}</td><td>{i.moq??"—"}</td><td>{money(i.quoted_price,selectedQuote.currency_code)}</td><td>{money(i.negotiated_price,selectedQuote.currency_code)}</td><td><button className="record-action delete" onClick={()=>removeQuoteItem(i.id)}><Trash2 size={14}/></button></td></tr>)}</tbody></table></div></Modal>}
  <GlobalSpinStyle/></>;
+}
+
+export default function Page() {
+  return (
+    <RequirePermission perm="procurement_ops.view">
+      <ProcurementPage />
+    </RequirePermission>
+  );
 }

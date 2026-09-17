@@ -10,6 +10,7 @@ import {
   DetailGrid, EmptyRow, Field, GlobalSpinStyle, LoadingRow, Message,
   Modal, SelectField, StatusBadge, TextAreaField, labelize,
 } from "@/components/RealUi";
+import { RequirePermission } from "@/components/RequirePermission";
 import { CurrentUser, apiFetch, getCurrentUser } from "@/lib/api";
 
 type Employee={
@@ -29,7 +30,7 @@ const employmentStatuses=["active","inactive","terminated","leave"];
 const tabs=["Employees","Job Roles","Shifts","Time Off"] as const;
 type Tab=(typeof tabs)[number];
 
-export default function EmployeesPage(){
+function EmployeesPage(){
   const [tab,setTab]=useState<Tab>("Employees");
   const [employees,setEmployees]=useState<Employee[]>([]);
   const [roles,setRoles]=useState<JobRole[]>([]);
@@ -348,4 +349,12 @@ export default function EmployeesPage(){
     </Modal>}
     <GlobalSpinStyle/>
   </>;
+}
+
+export default function Page() {
+  return (
+    <RequirePermission perm="employees.view">
+      <EmployeesPage />
+    </RequirePermission>
+  );
 }

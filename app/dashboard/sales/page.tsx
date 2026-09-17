@@ -4,13 +4,18 @@ import {
   ArrowDownToLine, ArrowUpFromLine, Eye, Loader2, PackageCheck, Pencil,
   Plus, RefreshCw, RotateCcw, Search, Trash2, WalletCards,
 } from "lucide-react";
-import { FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { keepPreviousData, useQuery, useQueryClient } from "@tanstack/react-query";
+import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
 
 import {
   DetailGrid, EmptyRow, Field, GlobalSpinStyle, LoadingRow, Message,
   Modal, SelectField, StatusBadge, TextAreaField, labelize, money, numberOrNull,
 } from "@/components/RealUi";
-import { CurrentUser, apiFetch, getCurrentUser } from "@/lib/api";
+import { RequirePermission } from "@/components/RequirePermission";
+import { apiFetch } from "@/lib/api";
+import { useCurrentUser } from "@/lib/hooks/useCurrentUser";
+import { invalidate } from "@/lib/invalidate";
+import { queryKeys } from "@/lib/queryKeys";
 
 type OrderItem = {
   id:string; item_id:string; item_code_snapshot:string; item_name_snapshot:string;
@@ -60,16 +65,12 @@ const emptyNewSale=():NewSaleForm=>({
 });
 const lineTotal=(l:SaleLine)=>Math.max((Number(l.quantity)||0)*(Number(l.unit_price)||0)-(Number(l.discount_amount)||0),0);
 
-export default function SalesPage() {
-  const [orders,setOrders]=useState<Order[]>([]);
-  const [customers,setCustomers]=useState<Customer[]>([]);
-  const [items,setItems]=useState<Item[]>([]);
-  const [channels,setChannels]=useState<Channel[]>([]);
-  const [locations,setLocations]=useState<Location[]>([]);
-  const [user,setUser]=useState<CurrentUser|null>(null);
+function SalesPage() {
+  const queryClient=useQueryClient();
+  const { data: user } = useCurrentUser();
   const [search,setSearch]=useState("");
+  const [debouncedSearch,setDebouncedSearch]=useState("");
   const [statusFilter,setStatusFilter]=useState("");
-  const [loading,setLoading]=useState(true);
   const [error,setError]=useState("");
   const [success,setSuccess]=useState("");
   const [mode,setMode]=useState<"create"|"view"|"edit"|"stock"|"payment"|"newsale"|null>(null);
@@ -93,33 +94,60 @@ export default function SalesPage() {
     return roles.has("manager")||roles.has("administrator");
   },[user]);
 
-  const load=useCallback(async()=>{
-    setLoading(true);setError("");
-    try{
+  useEffect(()=>{const t=setTimeout(()=>setDebouncedSearch(search),250);return()=>clearTimeout(t);},[search]);
+
+  const listParams=useMemo(()=>({
+    search:debouncedSearch.trim()||undefined,
+    order_status:statusFilter||undefined,
+  }),[debouncedSearch,statusFilter]);
+
+  const ordersQuery=useQuery({
+    queryKey:queryKeys.sales.list(listParams),
+    queryFn:()=>{
       const p=new URLSearchParams({limit:"300"});
-      if(search.trim())p.set("search",search.trim());
-      if(statusFilter)p.set("order_status",statusFilter);
-      const r=await apiFetch<ListResponse>(`/sales-orders?${p.toString()}`);
-      setOrders(r.items);
-    }catch(e:any){setError(e?.message||"Unable to load sales orders.");}
-    finally{setLoading(false);}
-  },[search,statusFilter]);
+      if(listParams.search)p.set("search",listParams.search);
+      if(listParams.order_status)p.set("order_status",listParams.order_status);
+      return apiFetch<ListResponse>(`/sales-orders?${p.toString()}`);
+    },
+    staleTime:90*1000,
+    gcTime:10*60*1000,
+    placeholderData:keepPreviousData,
+  });
+  const orders=ordersQuery.data?.items??[];
+  const loading=ordersQuery.isLoading;
 
-  useEffect(()=>{
-    Promise.all([
-      apiFetch<Customer[]>("/sales-orders/lookups/customers"),
-      apiFetch<Item[]>("/sales-orders/lookups/items?limit=300"),
-      apiFetch<Channel[]>("/sales-orders/lookups/channels"),
-      apiFetch<Location[]>("/inventory/locations"),
-      getCurrentUser(),
-    ]).then(([c,i,ch,loc,u])=>{
-      setCustomers(c);setItems(i);setChannels(ch);
-      setLocations(loc.filter(x=>x.operational_status==="active"));
-      setUser(u);
-    }).catch((e:any)=>setError(e?.message||"Unable to load sales lookups."));
-  },[]);
+  const customersLookupQuery=useQuery({
+    queryKey:queryKeys.sales.customerLookup(),
+    queryFn:()=>apiFetch<Customer[]>("/sales-orders/lookups/customers"),
+    staleTime:5*60*1000,
+  });
+  const customers=customersLookupQuery.data??[];
 
-  useEffect(()=>{const t=setTimeout(load,250);return()=>clearTimeout(t);},[load]);
+  const itemsLookupQuery=useQuery({
+    queryKey:queryKeys.sales.itemLookup(),
+    queryFn:()=>apiFetch<Item[]>("/sales-orders/lookups/items?limit=300"),
+    staleTime:2*60*1000,
+  });
+  const items=itemsLookupQuery.data??[];
+
+  const channelsLookupQuery=useQuery({
+    queryKey:queryKeys.sales.channelLookup(),
+    queryFn:()=>apiFetch<Channel[]>("/sales-orders/lookups/channels"),
+    staleTime:5*60*1000,
+  });
+  const channels=channelsLookupQuery.data??[];
+
+  const locationsQuery=useQuery({
+    queryKey:queryKeys.inventory.locations(),
+    queryFn:()=>apiFetch<Location[]>("/inventory/locations"),
+    staleTime:5*60*1000,
+  });
+  const locations=useMemo(
+    ()=>(locationsQuery.data??[]).filter(x=>x.operational_status==="active"),
+    [locationsQuery.data],
+  );
+
+  const load=()=>ordersQuery.refetch();
 
   const autoOpenedRef=useRef(false);
   useEffect(()=>{
@@ -233,7 +261,7 @@ export default function SalesPage() {
             const actionVerb=newSale.stockAction==="reserve"?"reserved":"fulfilled";
             setError(`Sale order ${order.order_number} was created, but stock for "${item.item_name_snapshot}" could not be ${actionVerb}: ${e?.message||"stock update failed"}. Remaining lines were not processed — open the order to finish stock actions manually. No payment was recorded.`);
             setMode(null);
-            await load();
+            await invalidate(queryClient,["sales","inventory","customers","dashboard"]);
             return;
           }
         }
@@ -270,17 +298,17 @@ export default function SalesPage() {
         :"";
       setSuccess(`Sale ${order.order_number} ${newSale.stockAction==="fulfill"?"completed":"created"}.${actionNote}${paymentNote}`);
       setMode(null);
-      await load();
+      await invalidate(queryClient,["sales","inventory","customers","payments","dashboard"]);
     }catch(e:any){setError(e?.message||"Unable to complete sale.");}
     finally{setNewSaleSaving(false);}
   }
 
-  async function refreshSelected(orderId:string){
+  async function refreshSelected(orderId:string,extraGroups:Array<"inventory"|"customers"|"payments"|"dashboard">=[]){
     const d=await apiFetch<Order>(`/sales-orders/${orderId}`);
     setSelected(d);
     try{setStock(await apiFetch<StockStatus>(`/sales-orders/${orderId}/inventory`));}
     catch{setStock(null);}
-    await load();
+    await invalidate(queryClient,["sales",...extraGroups]);
   }
 
   async function openOrder(order:Order,target:"view"|"edit"){
@@ -323,7 +351,7 @@ export default function SalesPage() {
         })});
         setSuccess("Sales order updated successfully.");
       }
-      await load();setMode(null);setSelected(null);
+      await invalidate(queryClient,["sales","dashboard"]);setMode(null);setSelected(null);
     }catch(e:any){setError(e?.message||"Unable to save sales order.");}
     finally{setSaving(false);}
   }
@@ -343,7 +371,7 @@ export default function SalesPage() {
       }
       if(!confirm(`Cancel ${order.order_number}?`))return;
       await apiFetch(`/sales-orders/${order.id}`,{method:"DELETE"});
-      setSuccess("Sales order cancelled.");await load();
+      setSuccess("Sales order cancelled.");await invalidate(queryClient,["sales","dashboard"]);
     }catch(e:any){setError(e?.message||"Unable to cancel order.");}
   }
 
@@ -433,7 +461,7 @@ export default function SalesPage() {
       if(stockForm.action==="return")body.unit_cost=stockForm.unit_cost?Number(stockForm.unit_cost):null;
       await apiFetch(endpoint,{method:"POST",body:JSON.stringify(body)});
       setSuccess(`${labelize(stockForm.action)} completed.`);
-      await refreshSelected(selected.id);
+      await refreshSelected(selected.id,["inventory","dashboard"]);
       setMode("view");
     }catch(e:any){setError(e?.message||"Stock operation failed.");}
     finally{setSaving(false);}
@@ -494,7 +522,7 @@ export default function SalesPage() {
         setSuccess("Payment recorded as Pending. A Manager/Admin must post it before it affects the paid balance.");
       }
 
-      await refreshSelected(selected.id);
+      await refreshSelected(selected.id,["payments","customers","dashboard"]);
       setMode("view");
     }catch(e:any){setError(e?.message||"Unable to record payment.");}
     finally{setSaving(false);}
@@ -511,7 +539,7 @@ export default function SalesPage() {
         <button className="btn btn-primary" onClick={openNewSale}><WalletCards size={15}/>New Sale</button></div>
     </div>
 
-    <Message error={error} success={success}/>
+    <Message error={error||(ordersQuery.isError?"Unable to load sales orders.":"")} success={success}/>
 
     <div className="card" style={{padding:12,marginBottom:14}}>
       <strong>Sales stock workflow:</strong>
@@ -718,4 +746,12 @@ export default function SalesPage() {
     </Modal>}
     <GlobalSpinStyle/>
   </>;
+}
+
+export default function Page() {
+  return (
+    <RequirePermission perm="sales.view">
+      <SalesPage />
+    </RequirePermission>
+  );
 }

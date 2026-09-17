@@ -1,10 +1,15 @@
 "use client";
 
+import { keepPreviousData, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Eye, Loader2, PackageCheck, Pencil, Plus, RefreshCw, Search, Trash2 } from "lucide-react";
-import { FormEvent, useCallback, useEffect, useMemo, useState } from "react";
+import { FormEvent, useEffect, useMemo, useState } from "react";
 
 import { DetailGrid, EmptyRow, Field, GlobalSpinStyle, LoadingRow, Message, Modal, SelectField, StatusBadge, TextAreaField, labelize, money } from "@/components/RealUi";
-import { CurrentUser, apiFetch, getCurrentUser } from "@/lib/api";
+import { RequirePermission } from "@/components/RequirePermission";
+import { apiFetch } from "@/lib/api";
+import { useCurrentUser } from "@/lib/hooks/useCurrentUser";
+import { invalidate } from "@/lib/invalidate";
+import { queryKeys } from "@/lib/queryKeys";
 
 type POItem={id:string;item_id:string;item_code_snapshot:string;description_snapshot:string|null;quantity_ordered:number|string;quantity_received:number|string;quantity_remaining:number|string;unit_cost:number|string;line_total:number|string;notes:string|null};
 type PO={id:string;po_number:string;supplier_id:string;supplier_name:string;order_date:string|null;expected_delivery:string|null;status:string;currency_code:string;shipping_amount:number|string;notes:string|null;items_total:number|string;order_total:number|string;paid_amount:number|string;balance_due:number|string;payment_status:string;items:POItem[];created_at:string;updated_at:string};
@@ -15,20 +20,36 @@ type Location={id:string;location_code:string;name:string|null;location_type:str
 const statuses=["draft","submitted","confirmed","in_production","partially_received","fully_received","cancelled","closed"];
 const manualStatuses=["draft","submitted","confirmed","in_production","closed"];
 
-export default function PurchaseOrdersPage(){
-  const [rows,setRows]=useState<PO[]>([]);const [suppliers,setSuppliers]=useState<Supplier[]>([]);const [items,setItems]=useState<Item[]>([]);const [locations,setLocations]=useState<Location[]>([]);const [user,setUser]=useState<CurrentUser|null>(null);const [search,setSearch]=useState("");const [statusFilter,setStatusFilter]=useState("");const [supplierFilter,setSupplierFilter]=useState("");const [loading,setLoading]=useState(true);const [error,setError]=useState("");const [success,setSuccess]=useState("");const [mode,setMode]=useState<"create"|"view"|"edit"|"receive"|null>(null);const [selected,setSelected]=useState<PO|null>(null);const [selectedLine,setSelectedLine]=useState<POItem|null>(null);const [saving,setSaving]=useState(false);
+function PurchaseOrdersPage(){
+  const queryClient=useQueryClient();
+  const { data: user } = useCurrentUser();
+  const [search,setSearch]=useState("");const [debouncedSearch,setDebouncedSearch]=useState("");const [statusFilter,setStatusFilter]=useState("");const [supplierFilter,setSupplierFilter]=useState("");const [error,setError]=useState("");const [success,setSuccess]=useState("");const [mode,setMode]=useState<"create"|"view"|"edit"|"receive"|null>(null);const [selected,setSelected]=useState<PO|null>(null);const [selectedLine,setSelectedLine]=useState<POItem|null>(null);const [saving,setSaving]=useState(false);
   const [form,setForm]=useState({supplier_id:"",order_date:"",expected_delivery:"",status:"draft",shipping_amount:"0",notes:"",item_id:"",quantity:"1",unit_cost:""});
   const [receiveForm,setReceiveForm]=useState({storage_location_id:"",quantity:"1",notes:""});
   const isManager=useMemo(()=>{const r=new Set((user?.roles||[]).map(x=>x.toLowerCase()));return r.has("manager")||r.has("administrator")},[user]);
-  const load=useCallback(async()=>{setLoading(true);try{const p=new URLSearchParams();if(search.trim())p.set("search",search.trim());if(statusFilter)p.set("po_status",statusFilter);if(supplierFilter)p.set("supplier_id",supplierFilter);p.set("limit","300");const r=await apiFetch<ListResponse>(`/purchase-orders?${p}`);setRows(r.items)}catch(e:any){setError(e?.message||"Unable to load purchase orders.")}finally{setLoading(false)}},[search,statusFilter,supplierFilter]);
-  useEffect(()=>{Promise.all([apiFetch<Supplier[]>("/purchase-orders/lookups/suppliers"),apiFetch<Item[]>("/purchase-orders/lookups/items?limit=300"),apiFetch<Location[]>("/purchase-orders/lookups/storage-locations"),getCurrentUser()]).then(([s,i,l,u])=>{setSuppliers(s);setItems(i);setLocations(l);setUser(u)}).catch((e:any)=>setError(e?.message||"Unable to load PO lookups."))},[]);useEffect(()=>{const t=setTimeout(load,250);return()=>clearTimeout(t)},[load]);
+  useEffect(()=>{const t=setTimeout(()=>setDebouncedSearch(search),250);return()=>clearTimeout(t)},[search]);
+  const listParams=useMemo(()=>({search:debouncedSearch.trim()||undefined,po_status:statusFilter||undefined,supplier_id:supplierFilter||undefined}),[debouncedSearch,statusFilter,supplierFilter]);
+  const poQuery=useQuery({
+    queryKey:queryKeys.purchaseOrders.list(listParams),
+    queryFn:()=>{const p=new URLSearchParams();if(listParams.search)p.set("search",listParams.search);if(listParams.po_status)p.set("po_status",listParams.po_status);if(listParams.supplier_id)p.set("supplier_id",listParams.supplier_id);p.set("limit","300");return apiFetch<ListResponse>(`/purchase-orders?${p}`);},
+    staleTime:2*60*1000,gcTime:10*60*1000,placeholderData:keepPreviousData,
+  });
+  const rows=poQuery.data?.items??[];
+  const loading=poQuery.isLoading;
+  const load=()=>poQuery.refetch();
+  const suppliersLookupQuery=useQuery({queryKey:queryKeys.purchaseOrders.supplierLookup(),queryFn:()=>apiFetch<Supplier[]>("/purchase-orders/lookups/suppliers"),staleTime:5*60*1000});
+  const suppliers=suppliersLookupQuery.data??[];
+  const itemsLookupQuery=useQuery({queryKey:queryKeys.purchaseOrders.itemLookup(),queryFn:()=>apiFetch<Item[]>("/purchase-orders/lookups/items?limit=300"),staleTime:2*60*1000});
+  const items=itemsLookupQuery.data??[];
+  const locationsLookupQuery=useQuery({queryKey:queryKeys.purchaseOrders.locationLookup(),queryFn:()=>apiFetch<Location[]>("/purchase-orders/lookups/storage-locations"),staleTime:5*60*1000});
+  const locations=locationsLookupQuery.data??[];
   function create(){setForm({supplier_id:suppliers[0]?.id||"",order_date:"",expected_delivery:"",status:"draft",shipping_amount:"0",notes:"",item_id:"",quantity:"1",unit_cost:""});setSelected(null);setMode("create")}
   async function open(po:PO,target:"view"|"edit"){setMode(target);try{const d=await apiFetch<PO>(`/purchase-orders/${po.id}`);setSelected(d);setForm({supplier_id:d.supplier_id,order_date:d.order_date||"",expected_delivery:d.expected_delivery||"",status:d.status,shipping_amount:String(d.shipping_amount),notes:d.notes||"",item_id:"",quantity:"1",unit_cost:""})}catch(e:any){setError(e?.message||"Unable to load purchase order.");setMode(null)}}
-  async function save(e:FormEvent){e.preventDefault();setSaving(true);setError("");try{if(mode==="create"){await apiFetch("/purchase-orders",{method:"POST",body:JSON.stringify({supplier_id:form.supplier_id,order_date:form.order_date||null,expected_delivery:form.expected_delivery||null,status:form.status,shipping_amount:Number(form.shipping_amount||0),notes:form.notes||null,items:form.item_id?[{item_id:form.item_id,quantity_ordered:Number(form.quantity),unit_cost:Number(form.unit_cost||0),notes:null}]:[]})});setSuccess("Purchase order created.")}else if(selected){await apiFetch(`/purchase-orders/${selected.id}`,{method:"PUT",body:JSON.stringify({supplier_id:form.supplier_id,order_date:form.order_date||null,expected_delivery:form.expected_delivery||null,status:form.status,shipping_amount:Number(form.shipping_amount||0),notes:form.notes||null})});setSuccess("Purchase order updated.")}await load();setMode(null)}catch(e:any){setError(e?.message||"Unable to save purchase order.")}finally{setSaving(false)}}
-  async function cancel(po:PO){if(!confirm(`Cancel ${po.po_number}?`))return;try{await apiFetch(`/purchase-orders/${po.id}`,{method:"DELETE"});setSuccess("Purchase order cancelled.");await load()}catch(e:any){setError(e?.message||"Unable to cancel PO.")}}
-  async function addLine(){if(!selected)return;const itemId=prompt("Item ID",items[0]?.id||"");if(!itemId)return;const qty=Number(prompt("Quantity ordered","1")||0);const cost=Number(prompt("Unit cost","0")||0);try{await apiFetch(`/purchase-orders/${selected.id}/items`,{method:"POST",body:JSON.stringify({item_id:itemId,quantity_ordered:qty,unit_cost:cost,notes:null})});await open(selected,"view")}catch(e:any){setError(e?.message||"Unable to add PO line.")}}
-  async function editLine(line:POItem){if(!selected)return;const qty=Number(prompt("Quantity ordered",String(line.quantity_ordered))||0);const cost=Number(prompt("Unit cost",String(line.unit_cost))||0);try{await apiFetch(`/purchase-orders/${selected.id}/items/${line.id}`,{method:"PUT",body:JSON.stringify({quantity_ordered:qty,unit_cost:cost})});await open(selected,"view")}catch(e:any){setError(e?.message||"Unable to edit PO line.")}}
-  async function removeLine(line:POItem){if(!selected||!confirm(`Remove ${line.item_code_snapshot}?`))return;try{await apiFetch(`/purchase-orders/${selected.id}/items/${line.id}`,{method:"DELETE"});await open(selected,"view")}catch(e:any){setError(e?.message||"Unable to remove PO line.")}}
+  async function save(e:FormEvent){e.preventDefault();setSaving(true);setError("");try{if(mode==="create"){await apiFetch("/purchase-orders",{method:"POST",body:JSON.stringify({supplier_id:form.supplier_id,order_date:form.order_date||null,expected_delivery:form.expected_delivery||null,status:form.status,shipping_amount:Number(form.shipping_amount||0),notes:form.notes||null,items:form.item_id?[{item_id:form.item_id,quantity_ordered:Number(form.quantity),unit_cost:Number(form.unit_cost||0),notes:null}]:[]})});setSuccess("Purchase order created.")}else if(selected){await apiFetch(`/purchase-orders/${selected.id}`,{method:"PUT",body:JSON.stringify({supplier_id:form.supplier_id,order_date:form.order_date||null,expected_delivery:form.expected_delivery||null,status:form.status,shipping_amount:Number(form.shipping_amount||0),notes:form.notes||null})});setSuccess("Purchase order updated.")}await invalidate(queryClient,["purchaseOrders","dashboard"]);setMode(null)}catch(e:any){setError(e?.message||"Unable to save purchase order.")}finally{setSaving(false)}}
+  async function cancel(po:PO){if(!confirm(`Cancel ${po.po_number}?`))return;try{await apiFetch(`/purchase-orders/${po.id}`,{method:"DELETE"});setSuccess("Purchase order cancelled.");await invalidate(queryClient,["purchaseOrders","dashboard"])}catch(e:any){setError(e?.message||"Unable to cancel PO.")}}
+  async function addLine(){if(!selected)return;const itemId=prompt("Item ID",items[0]?.id||"");if(!itemId)return;const qty=Number(prompt("Quantity ordered","1")||0);const cost=Number(prompt("Unit cost","0")||0);try{await apiFetch(`/purchase-orders/${selected.id}/items`,{method:"POST",body:JSON.stringify({item_id:itemId,quantity_ordered:qty,unit_cost:cost,notes:null})});await open(selected,"view");await invalidate(queryClient,["purchaseOrders"])}catch(e:any){setError(e?.message||"Unable to add PO line.")}}
+  async function editLine(line:POItem){if(!selected)return;const qty=Number(prompt("Quantity ordered",String(line.quantity_ordered))||0);const cost=Number(prompt("Unit cost",String(line.unit_cost))||0);try{await apiFetch(`/purchase-orders/${selected.id}/items/${line.id}`,{method:"PUT",body:JSON.stringify({quantity_ordered:qty,unit_cost:cost})});await open(selected,"view");await invalidate(queryClient,["purchaseOrders"])}catch(e:any){setError(e?.message||"Unable to edit PO line.")}}
+  async function removeLine(line:POItem){if(!selected||!confirm(`Remove ${line.item_code_snapshot}?`))return;try{await apiFetch(`/purchase-orders/${selected.id}/items/${line.id}`,{method:"DELETE"});await open(selected,"view");await invalidate(queryClient,["purchaseOrders"])}catch(e:any){setError(e?.message||"Unable to remove PO line.")}}
   function beginReceive(line:POItem){
     if(!selected)return;
     if(Number(line.quantity_remaining)<=0){setError("This PO line is already fully received.");return}
@@ -65,7 +86,7 @@ export default function PurchaseOrdersPage(){
       setSuccess("Stock received. PO received quantity, PO status, inventory balance and inventory movement were updated.");
       setMode("view");
       setSelectedLine(null);
-      await load();
+      await invalidate(queryClient,["purchaseOrders","inventory","suppliers","dashboard"]);
     }catch(e:any){
       setError(e?.message||"Unable to receive PO inventory.");
     }finally{
@@ -73,7 +94,7 @@ export default function PurchaseOrdersPage(){
     }
   }
 
-  return <><div className="page-header"><div><div className="eyebrow">Procurement</div><h1 className="page-title">Purchase Orders</h1><p className="page-copy">Live supplier orders from draft through inventory receiving.</p></div><div style={{display:"flex",gap:8}}><button className="btn btn-secondary" onClick={load}><RefreshCw size={15}/>Refresh</button><button className="btn btn-primary" onClick={create}><Plus size={15}/>Add PO</button></div></div><Message error={error} success={success}/>
+  return <><div className="page-header"><div><div className="eyebrow">Procurement</div><h1 className="page-title">Purchase Orders</h1><p className="page-copy">Live supplier orders from draft through inventory receiving.</p></div><div style={{display:"flex",gap:8}}><button className="btn btn-secondary" onClick={load}><RefreshCw size={15}/>Refresh</button><button className="btn btn-primary" onClick={create}><Plus size={15}/>Add PO</button></div></div><Message error={error||(poQuery.isError?"Unable to load purchase orders.":"")} success={success}/>
   <div className="records-toolbar card"><div><strong>All Purchase Orders</strong><div className="muted" style={{fontSize:12}}>{rows.length} visible</div></div><div style={{display:"flex",gap:8,flexWrap:"wrap"}}><div className="records-search"><Search size={15}/><input value={search} onChange={e=>setSearch(e.target.value)} placeholder="PO or supplier..."/></div><select className="select" style={{width:160}} value={statusFilter} onChange={e=>setStatusFilter(e.target.value)}><option value="">All statuses</option>{statuses.map(s=><option key={s} value={s}>{labelize(s)}</option>)}</select><select className="select" style={{width:170}} value={supplierFilter} onChange={e=>setSupplierFilter(e.target.value)}><option value="">All suppliers</option>{suppliers.map(s=><option key={s.id} value={s.id}>{s.name}</option>)}</select></div></div>
   <div className="table-wrap"><table><thead><tr><th>PO</th><th>Supplier</th><th>Date</th><th>Expected</th><th>Total</th><th>Paid</th><th>Balance</th><th>Status</th><th>Actions</th></tr></thead><tbody>{loading?<LoadingRow columns={9}/>:rows.length===0?<EmptyRow columns={9}/>:rows.map(p=><tr key={p.id}><td><strong>{p.po_number}</strong></td><td>{p.supplier_name}</td><td>{p.order_date||"—"}</td><td>{p.expected_delivery||"—"}</td><td>{money(p.order_total,p.currency_code)}</td><td>{money(p.paid_amount,p.currency_code)}</td><td>{money(p.balance_due,p.currency_code)}</td><td><StatusBadge value={p.status}/></td><td><div className="record-actions"><button className="record-action view" onClick={()=>open(p,"view")}><Eye size={14}/></button><button className="record-action edit" onClick={()=>open(p,"edit")}><Pencil size={14}/></button>{isManager&&p.status!=="cancelled"&&<button className="record-action delete" onClick={()=>cancel(p)}><Trash2 size={14}/></button>}</div></td></tr>)}</tbody></table></div>
   {(mode==="create"||mode==="edit")&&<Modal title={mode==="create"?"Create Purchase Order":`Edit ${selected?.po_number||"PO"}`} eyebrow="Purchase Order" onClose={()=>setMode(null)}><form onSubmit={save}><div className="form-grid"><SelectField label="Supplier" value={form.supplier_id} onChange={v=>setForm({...form,supplier_id:v})} required options={[{value:"",label:"Select supplier..."},...suppliers.map(s=>({value:s.id,label:s.name}))]}/><SelectField label="Status" value={form.status} onChange={v=>setForm({...form,status:v})}
@@ -115,4 +136,12 @@ export default function PurchaseOrdersPage(){
     </form>
   </Modal>}
   <GlobalSpinStyle/></>;
+}
+
+export default function Page() {
+  return (
+    <RequirePermission perm="purchase_orders.view">
+      <PurchaseOrdersPage />
+    </RequirePermission>
+  );
 }

@@ -19,6 +19,7 @@ import {
   useState,
 } from "react";
 
+import { RequirePermission } from "@/components/RequirePermission";
 import { ApiError, apiFetch } from "@/lib/api";
 
 type UsedPart = {
@@ -217,7 +218,7 @@ function partToForm(part: UsedPart): FormState {
   };
 }
 
-export default function UsedPartsPage() {
+function UsedPartsPage() {
   const [parts, setParts] = useState<UsedPart[]>([]);
   const [total, setTotal] = useState(0);
   const [search, setSearch] = useState("");
@@ -1153,5 +1154,13 @@ function SpinStyle() {
         }
       }
     `}</style>
+  );
+}
+
+export default function Page() {
+  return (
+    <RequirePermission perm="used_parts.view">
+      <UsedPartsPage />
+    </RequirePermission>
   );
 }

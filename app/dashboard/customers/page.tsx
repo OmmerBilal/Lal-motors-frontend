@@ -12,21 +12,20 @@ import {
   Users,
   X,
 } from "lucide-react";
+import { keepPreviousData, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   FormEvent,
-  useCallback,
   useEffect,
   useMemo,
   useRef,
   useState,
 } from "react";
 
-import {
-  ApiError,
-  CurrentUser,
-  apiFetch,
-  getCurrentUser,
-} from "@/lib/api";
+import { RequirePermission } from "@/components/RequirePermission";
+import { ApiError, apiFetch } from "@/lib/api";
+import { useCurrentUser } from "@/lib/hooks/useCurrentUser";
+import { invalidate } from "@/lib/invalidate";
+import { queryKeys } from "@/lib/queryKeys";
 
 type Contact = {
   id: string;
@@ -153,10 +152,12 @@ function labelize(value: string) {
     .replace(/\b\w/g, (char) => char.toUpperCase());
 }
 
-export default function CustomersPage() {
-  const [customers, setCustomers] = useState<Customer[]>([]);
-  const [total, setTotal] = useState(0);
+function CustomersPage() {
+  const queryClient = useQueryClient();
+  const { data: user } = useCurrentUser();
+
   const [search, setSearch] = useState("");
+  const [debouncedSearch, setDebouncedSearch] = useState("");
   const [typeFilter, setTypeFilter] = useState("");
   const [activeOnly, setActiveOnly] = useState(true);
 
@@ -178,9 +179,6 @@ export default function CustomersPage() {
     notes: "",
   });
 
-  const [user, setUser] = useState<CurrentUser | null>(null);
-
-  const [loading, setLoading] = useState(true);
   const [detailLoading, setDetailLoading] = useState(false);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
@@ -193,37 +191,37 @@ export default function CustomersPage() {
     return roles.has("manager") || roles.has("administrator");
   }, [user]);
 
-  const loadCustomers = useCallback(async () => {
-    setLoading(true);
-    setError("");
-
-    try {
-      const params = new URLSearchParams();
-      if (search.trim()) params.set("search", search.trim());
-      if (typeFilter) params.set("customer_type", typeFilter);
-      params.set("active_only", String(activeOnly));
-      params.set("limit", "300");
-
-      const result = await apiFetch<CustomerList>(
-        `/customers?${params.toString()}`,
-      );
-      setCustomers(result.items);
-      setTotal(result.total);
-    } catch (err: any) {
-      setError(err?.message || "Unable to load customers.");
-    } finally {
-      setLoading(false);
-    }
-  }, [search, typeFilter, activeOnly]);
-
   useEffect(() => {
-    getCurrentUser().then(setUser).catch(() => {});
-  }, []);
-
-  useEffect(() => {
-    const timer = window.setTimeout(loadCustomers, 250);
+    const timer = window.setTimeout(() => setDebouncedSearch(search), 250);
     return () => window.clearTimeout(timer);
-  }, [loadCustomers]);
+  }, [search]);
+
+  const listParams = useMemo(
+    () => ({
+      search: debouncedSearch.trim() || undefined,
+      customer_type: typeFilter || undefined,
+      active_only: activeOnly,
+    }),
+    [debouncedSearch, typeFilter, activeOnly],
+  );
+
+  const customersQuery = useQuery({
+    queryKey: queryKeys.customers.list(listParams),
+    queryFn: () => {
+      const params = new URLSearchParams();
+      if (listParams.search) params.set("search", listParams.search);
+      if (listParams.customer_type) params.set("customer_type", listParams.customer_type);
+      params.set("active_only", String(listParams.active_only));
+      params.set("limit", "300");
+      return apiFetch<CustomerList>(`/customers?${params.toString()}`);
+    },
+    staleTime: 5 * 60 * 1000,
+    gcTime: 15 * 60 * 1000,
+    placeholderData: keepPreviousData,
+  });
+  const customers = customersQuery.data?.items ?? [];
+  const total = customersQuery.data?.total ?? 0;
+  const loading = customersQuery.isLoading;
 
   const autoOpenedRef = useRef(false);
   useEffect(() => {
@@ -323,7 +321,7 @@ export default function CustomersPage() {
         setSuccess("Customer updated successfully.");
       }
 
-      await loadCustomers();
+      await invalidate(queryClient, ["customers", "dashboard"]);
 
       window.setTimeout(() => {
         setMode(null);
@@ -351,7 +349,7 @@ export default function CustomersPage() {
         method: "DELETE",
       });
       setSuccess(`${customer.name} deactivated successfully.`);
-      await loadCustomers();
+      await invalidate(queryClient, ["customers", "dashboard"]);
     } catch (err) {
       if (err instanceof ApiError && err.status === 403) {
         setError(
@@ -488,7 +486,7 @@ export default function CustomersPage() {
         <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
           <button
             className="btn btn-secondary"
-            onClick={() => loadCustomers()}
+            onClick={() => customersQuery.refetch()}
           >
             <RefreshCw size={15} /> Refresh
           </button>
@@ -518,7 +516,7 @@ export default function CustomersPage() {
         />
       </div>
 
-      <Message error={error} success={success} />
+      <Message error={error || (customersQuery.isError ? "Unable to load customers." : "")} success={success} />
 
       <section className="records-section">
         <div className="records-toolbar card">
@@ -1242,5 +1240,13 @@ function Message({
     >
       {error || success}
     </div>
+  );
+}
+
+export default function Page() {
+  return (
+    <RequirePermission perm="customers.view">
+      <CustomersPage />
+    </RequirePermission>
   );
 }

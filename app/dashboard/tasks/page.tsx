@@ -7,6 +7,7 @@ import {
   DetailGrid, EmptyRow, Field, GlobalSpinStyle, LoadingRow, Message,
   Modal, SelectField, StatusBadge, TextAreaField, labelize,
 } from "@/components/RealUi";
+import { RequirePermission } from "@/components/RequirePermission";
 import { apiFetch } from "@/lib/api";
 
 type Task = {
@@ -21,7 +22,7 @@ type UserLookup = {id:string;name:string;email:string;status:string};
 const priorities=["low","medium","high","urgent"];
 const statuses=["todo","in_progress","blocked","completed","cancelled"];
 
-export default function TasksPage(){
+function TasksPage(){
   const [rows,setRows]=useState<Task[]>([]);
   const [users,setUsers]=useState<UserLookup[]>([]);
   const [search,setSearch]=useState("");
@@ -183,4 +184,12 @@ export default function TasksPage(){
     </Modal>}
     <GlobalSpinStyle/>
   </>;
+}
+
+export default function Page() {
+  return (
+    <RequirePermission perm="tasks.view">
+      <TasksPage />
+    </RequirePermission>
+  );
 }

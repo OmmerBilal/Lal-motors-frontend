@@ -11,15 +11,18 @@ import {
   Search,
   X,
 } from "lucide-react";
+import { keepPreviousData, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   FormEvent,
-  useCallback,
   useEffect,
   useMemo,
   useState,
 } from "react";
 
+import { RequirePermission } from "@/components/RequirePermission";
 import { ApiError, apiFetch } from "@/lib/api";
+import { invalidate } from "@/lib/invalidate";
+import { queryKeys } from "@/lib/queryKeys";
 
 type Vehicle = {
   id: string;
@@ -212,18 +215,13 @@ function vehicleToForm(vehicle: Vehicle): VehicleForm {
   };
 }
 
-export default function VehiclesPage() {
-  const [vehicles, setVehicles] = useState<Vehicle[]>([]);
-  const [total, setTotal] = useState(0);
+function VehiclesPage() {
+  const queryClient = useQueryClient();
   const [search, setSearch] = useState("");
+  const [debouncedSearch, setDebouncedSearch] = useState("");
   const [statusFilter, setStatusFilter] = useState("");
   const [includeArchived, setIncludeArchived] = useState(false);
 
-  const [makes, setMakes] = useState<VehicleMake[]>([]);
-  const [models, setModels] = useState<VehicleModel[]>([]);
-  const [locations, setLocations] = useState<StorageLocation[]>([]);
-
-  const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
   const [success, setSuccess] = useState("");
@@ -231,6 +229,53 @@ export default function VehiclesPage() {
   const [mode, setMode] = useState<Mode>(null);
   const [selected, setSelected] = useState<Vehicle | null>(null);
   const [form, setForm] = useState<VehicleForm>(emptyForm);
+
+  useEffect(() => {
+    const timer = window.setTimeout(() => setDebouncedSearch(search), 250);
+    return () => window.clearTimeout(timer);
+  }, [search]);
+
+  const listParams = useMemo(
+    () => ({
+      search: debouncedSearch.trim() || undefined,
+      inventory_status: statusFilter || undefined,
+      include_archived: includeArchived,
+    }),
+    [debouncedSearch, statusFilter, includeArchived],
+  );
+
+  const vehiclesQuery = useQuery({
+    queryKey: queryKeys.vehicles.list(listParams),
+    queryFn: () => {
+      const params = new URLSearchParams();
+      if (listParams.search) params.set("search", listParams.search);
+      if (listParams.inventory_status) params.set("inventory_status", listParams.inventory_status);
+      params.set("include_archived", String(listParams.include_archived));
+      params.set("limit", "200");
+      return apiFetch<VehicleListResponse>(`/vehicles?${params.toString()}`);
+    },
+    staleTime: 3 * 60 * 1000,
+    gcTime: 10 * 60 * 1000,
+    placeholderData: keepPreviousData,
+  });
+  const vehicles = vehiclesQuery.data?.items ?? [];
+  const total = vehiclesQuery.data?.total ?? 0;
+  const loading = vehiclesQuery.isLoading;
+  const loadVehicles = () => vehiclesQuery.refetch();
+
+  const makesQuery = useQuery({
+    queryKey: queryKeys.vehicles.makes(),
+    queryFn: () => apiFetch<VehicleMake[]>("/vehicles/lookups/makes"),
+    staleTime: 10 * 60 * 1000,
+  });
+  const makes = makesQuery.data ?? [];
+
+  const locationsQuery = useQuery({
+    queryKey: queryKeys.vehicles.locations(),
+    queryFn: () => apiFetch<StorageLocation[]>("/vehicles/lookups/storage-locations"),
+    staleTime: 5 * 60 * 1000,
+  });
+  const locations = locationsQuery.data ?? [];
 
   const matchedMake = useMemo(
     () =>
@@ -241,77 +286,13 @@ export default function VehiclesPage() {
     [makes, form.make_name],
   );
 
-  const loadVehicles = useCallback(async () => {
-    setLoading(true);
-    setError("");
-
-    try {
-      const params = new URLSearchParams();
-
-      if (search.trim()) {
-        params.set("search", search.trim());
-      }
-
-      if (statusFilter) {
-        params.set("inventory_status", statusFilter);
-      }
-
-      params.set("include_archived", String(includeArchived));
-      params.set("limit", "200");
-
-      const response = await apiFetch<VehicleListResponse>(
-        `/vehicles?${params.toString()}`,
-      );
-
-      setVehicles(response.items);
-      setTotal(response.total);
-    } catch (err: any) {
-      setError(err?.message || "Unable to load vehicles.");
-    } finally {
-      setLoading(false);
-    }
-  }, [search, statusFilter, includeArchived]);
-
-  async function loadLookups() {
-    try {
-      const [makeData, locationData] = await Promise.all([
-        apiFetch<VehicleMake[]>("/vehicles/lookups/makes"),
-        apiFetch<StorageLocation[]>(
-          "/vehicles/lookups/storage-locations",
-        ),
-      ]);
-
-      setMakes(makeData);
-      setLocations(locationData);
-    } catch (err: any) {
-      setError(err?.message || "Unable to load vehicle lookups.");
-    }
-  }
-
-  useEffect(() => {
-    loadLookups();
-  }, []);
-
-  useEffect(() => {
-    const timer = window.setTimeout(() => {
-      loadVehicles();
-    }, 250);
-
-    return () => window.clearTimeout(timer);
-  }, [loadVehicles]);
-
-  useEffect(() => {
-    if (!matchedMake) {
-      setModels([]);
-      return;
-    }
-
-    apiFetch<VehicleModel[]>(
-      `/vehicles/lookups/models?make_id=${matchedMake.id}`,
-    )
-      .then(setModels)
-      .catch(() => setModels([]));
-  }, [matchedMake]);
+  const modelsQuery = useQuery({
+    queryKey: queryKeys.vehicles.models(matchedMake?.id ?? ""),
+    queryFn: () => apiFetch<VehicleModel[]>(`/vehicles/lookups/models?make_id=${matchedMake!.id}`),
+    enabled: !!matchedMake,
+    staleTime: 10 * 60 * 1000,
+  });
+  const models = matchedMake ? modelsQuery.data ?? [] : [];
 
   function openCreate() {
     setSelected(null);
@@ -405,8 +386,7 @@ export default function VehiclesPage() {
         setSuccess("Vehicle updated successfully.");
       }
 
-      await loadVehicles();
-      await loadLookups();
+      await invalidate(queryClient, ["vehicles", "inventory", "dashboard"]);
 
       window.setTimeout(() => {
         setMode(null);
@@ -436,7 +416,7 @@ export default function VehiclesPage() {
       });
 
       setSuccess(`${vehicle.name} archived successfully.`);
-      await loadVehicles();
+      await invalidate(queryClient, ["vehicles", "inventory", "dashboard"]);
     } catch (err) {
       if (err instanceof ApiError && err.status === 403) {
         setError(
@@ -451,6 +431,8 @@ export default function VehiclesPage() {
       }
     }
   }
+
+  const displayError = error || (vehiclesQuery.isError ? "Unable to load vehicles." : "");
 
   return (
     <>
@@ -541,7 +523,7 @@ export default function VehiclesPage() {
         </div>
       </div>
 
-      {error && (
+      {displayError && (
         <div
           className="card"
           style={{
@@ -552,7 +534,7 @@ export default function VehiclesPage() {
             color: "var(--danger)",
           }}
         >
-          {error}
+          {displayError}
         </div>
       )}
 
@@ -1244,5 +1226,13 @@ function VehicleDetails({ vehicle }: { vehicle: Vehicle }) {
         </div>
       ))}
     </div>
+  );
+}
+
+export default function Page() {
+  return (
+    <RequirePermission perm="vehicles.view">
+      <VehiclesPage />
+    </RequirePermission>
   );
 }

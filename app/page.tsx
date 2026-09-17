@@ -23,8 +23,7 @@ export default function HomePage() {
 
           <div className="nav-actions">
             <ThemeToggle />
-            <Link href="/login" className="btn btn-secondary">Login</Link>
-            <Link href="/signup" className="btn btn-primary">Sign Up <ArrowRight size={15} /></Link>
+            <Link href="/login" className="btn btn-primary">Login <ArrowRight size={15} /></Link>
           </div>
         </div>
       </header>
@@ -51,9 +50,6 @@ export default function HomePage() {
                 <div className="hero-actions">
                   <Link href="/login" className="btn btn-primary hero-main-btn">
                     Login to Dashboard <ArrowRight size={16} />
-                  </Link>
-                  <Link href="/signup" className="btn hero-glass-btn">
-                    Create Account
                   </Link>
                   <a href="#ai" className="btn hero-glass-btn">
                     <PlayCircle size={16} /> Explore AI

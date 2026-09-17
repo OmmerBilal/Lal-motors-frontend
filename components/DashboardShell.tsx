@@ -12,18 +12,27 @@ import {
   Sparkles,
   X,
 } from "lucide-react";
+import { useQueryClient } from "@tanstack/react-query";
 import { useEffect, useMemo, useRef, useState } from "react";
 
 import { allNavigationItems, navGroups } from "@/lib/navigation";
 import { ThemeToggle } from "@/components/ThemeToggle";
-import { CurrentUser, getCurrentUser, logout } from "@/lib/api";
+import { changePassword, logout } from "@/lib/api";
+import { useCurrentUser } from "@/lib/hooks/useCurrentUser";
+import { usePermissions } from "@/lib/hooks/usePermissions";
+import { usePrefetchModules } from "@/lib/hooks/usePrefetchModules";
+import { queryKeys } from "@/lib/queryKeys";
+
+type NavItem = (typeof allNavigationItems)[number];
 
 function ModuleSearch({
+  items,
   value,
   onChange,
   onNavigate,
   compact = false,
 }: {
+  items: NavItem[];
   value: string;
   onChange: (value: string) => void;
   onNavigate: () => void;
@@ -45,12 +54,15 @@ function ModuleSearch({
   const results = useMemo(() => {
     const q = value.trim().toLowerCase();
     if (!q) return [];
-    return allNavigationItems
+    // `items` is already filtered to what the current employee is
+    // authorized to see (see DashboardShell) — search can never surface,
+    // or navigate to, an unauthorized module.
+    return items
       .filter((item) =>
         `${item.label} ${item.keywords} ${item.group}`.toLowerCase().includes(q),
       )
       .slice(0, 8);
-  }, [value]);
+  }, [value, items]);
 
   return (
     <div ref={wrap} style={{ position: "relative", width: "100%" }}>
@@ -147,35 +159,107 @@ function ModuleSearch({
   );
 }
 
+function ForcePasswordChangeModal({ onDone }: { onDone: () => void }) {
+  const [currentPassword, setCurrentPassword] = useState("");
+  const [newPassword, setNewPassword] = useState("");
+  const [confirmPassword, setConfirmPassword] = useState("");
+  const [error, setError] = useState<string | null>(null);
+  const [saving, setSaving] = useState(false);
+
+  async function submit(e: React.FormEvent) {
+    e.preventDefault();
+    setError(null);
+    if (newPassword.length < 8) {
+      setError("New password must be at least 8 characters.");
+      return;
+    }
+    if (newPassword !== confirmPassword) {
+      setError("Passwords do not match.");
+      return;
+    }
+    setSaving(true);
+    try {
+      await changePassword(currentPassword, newPassword);
+      onDone();
+    } catch (err: any) {
+      setError(err?.message || "Could not change password.");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <div
+      style={{
+        position: "fixed", inset: 0, zIndex: 200, background: "rgba(0,0,0,0.55)",
+        display: "grid", placeItems: "center", padding: 16,
+      }}
+    >
+      <form onSubmit={submit} className="card" style={{ width: "min(420px, 100%)", padding: 24 }}>
+        <h2 style={{ margin: "0 0 6px", fontSize: 17 }}>Set your password</h2>
+        <p className="muted" style={{ margin: "0 0 16px", fontSize: 13 }}>
+          You're using a temporary password. Choose your own before continuing.
+        </p>
+        <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+          <input
+            type="password" placeholder="Temporary password" value={currentPassword}
+            onChange={(e) => setCurrentPassword(e.target.value)} required
+            className="input"
+          />
+          <input
+            type="password" placeholder="New password (min 8 characters)" value={newPassword}
+            onChange={(e) => setNewPassword(e.target.value)} required minLength={8}
+            className="input"
+          />
+          <input
+            type="password" placeholder="Confirm new password" value={confirmPassword}
+            onChange={(e) => setConfirmPassword(e.target.value)} required
+            className="input"
+          />
+        </div>
+        {error && <div style={{ color: "var(--danger, #d33)", fontSize: 12, marginTop: 10 }}>{error}</div>}
+        <button type="submit" className="btn btn-primary" disabled={saving} style={{ marginTop: 16, width: "100%" }}>
+          {saving ? "Saving..." : "Set password"}
+        </button>
+      </form>
+    </div>
+  );
+}
+
 export function DashboardShell({ children }: { children: React.ReactNode }) {
   const pathname = usePathname();
   const router = useRouter();
 
-  const [user, setUser] = useState<CurrentUser | null>(null);
-  const [checking, setChecking] = useState(true);
+  const queryClient = useQueryClient();
   const [loggingOut, setLoggingOut] = useState(false);
   const [moduleQuery, setModuleQuery] = useState("");
 
-  useEffect(() => {
-    let active = true;
-    getCurrentUser()
-      .then((currentUser) => {
-        if (active) {
-          setUser(currentUser);
-          setChecking(false);
-        }
-      })
-      .catch(() => {
-        if (active) {
-          setChecking(false);
-          router.replace("/login");
-        }
-      });
+  const { data: user, isLoading: checking, isError: sessionInvalid } = useCurrentUser();
+  const { has } = usePermissions();
 
-    return () => {
-      active = false;
-    };
-  }, [router]);
+  useEffect(() => {
+    if (sessionInvalid) router.replace("/login");
+  }, [sessionInvalid, router]);
+
+  usePrefetchModules(!!user, has);
+
+  // Sidebar and the module search share one filtered source — a module the
+  // employee isn't authorized for never appears in either, and is never
+  // navigated to from search results.
+  const visibleNavGroups = useMemo(
+    () =>
+      navGroups
+        .map((group) => ({
+          ...group,
+          items: group.items.filter((item) => has(item.requiredPermission)),
+        }))
+        .filter((group) => group.items.length > 0),
+    [has],
+  );
+  const visibleNavigationItems = useMemo(
+    () => allNavigationItems.filter((item) => has(item.requiredPermission)),
+    [has],
+  );
 
   const initials = useMemo(() => {
     const source = user?.display_name || user?.email || "User";
@@ -192,6 +276,10 @@ export function DashboardShell({ children }: { children: React.ReactNode }) {
     try {
       await logout();
     } finally {
+      // Clear every cached query so the next signed-in user (or a re-login
+      // by the same user) never renders a stale screen of someone else's
+      // business data for even a frame.
+      queryClient.clear();
       router.replace("/login");
       router.refresh();
       setLoggingOut(false);
@@ -212,6 +300,9 @@ export function DashboardShell({ children }: { children: React.ReactNode }) {
 
   return (
     <div className="dashboard-shell">
+      {user.must_change_password && (
+        <ForcePasswordChangeModal onDone={() => queryClient.invalidateQueries({ queryKey: queryKeys.auth.me() })} />
+      )}
       <aside className="sidebar">
         <div className="sidebar-brand">
           <Link href="/dashboard" className="brand" title="Overall Dashboard">
@@ -221,10 +312,10 @@ export function DashboardShell({ children }: { children: React.ReactNode }) {
         </div>
 
         <div className="sidebar-module-search" style={{ padding: "0 4px 8px" }}>
-          <ModuleSearch value={moduleQuery} onChange={setModuleQuery} onNavigate={() => {}} />
+          <ModuleSearch items={visibleNavigationItems} value={moduleQuery} onChange={setModuleQuery} onNavigate={() => {}} />
         </div>
 
-        {navGroups.map((group) => (
+        {visibleNavGroups.map((group) => (
           <div key={group.title}>
             <div className="nav-section-title">{group.title}</div>
             {group.items.map((item) => {
@@ -275,7 +366,7 @@ export function DashboardShell({ children }: { children: React.ReactNode }) {
           <button className="icon-btn mobile-menu"><Menu size={17} /></button>
 
           <div style={{ width: "min(520px, 100%)" }}>
-            <ModuleSearch compact value={moduleQuery} onChange={setModuleQuery} onNavigate={() => {}} />
+            <ModuleSearch compact items={visibleNavigationItems} value={moduleQuery} onChange={setModuleQuery} onNavigate={() => {}} />
           </div>
 
           <div style={{ display: "flex", alignItems: "center", gap: 8 }}>

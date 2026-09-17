@@ -184,13 +184,7 @@ export default function LoginPage() {
           style={{ textAlign: "center", marginTop: 18, fontSize: 13 }}
           className="muted"
         >
-          Need an account?{" "}
-          <Link
-            href="/signup"
-            style={{ color: "var(--accent)", fontWeight: 800 }}
-          >
-            Create account
-          </Link>
+          Lal Motors BOS is an internal system. Contact your administrator for access.
         </div>
       </div>
     </main>

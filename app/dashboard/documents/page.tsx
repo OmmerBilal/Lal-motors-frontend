@@ -7,6 +7,7 @@ import {
   DetailGrid, EmptyRow, Field, GlobalSpinStyle, LoadingRow, Message,
   Modal, SelectField, TextAreaField,
 } from "@/components/RealUi";
+import { RequirePermission } from "@/components/RequirePermission";
 import { apiFetch } from "@/lib/api";
 
 type FileMeta={id:string;storage_provider:string;bucket_name:string|null;object_key:string;original_filename:string|null;mime_type:string|null;byte_size:number|null;checksum_sha256:string|null;created_by_user_id:string|null;created_at:string};
@@ -21,7 +22,7 @@ type DocumentRecord={
 };
 type DocumentList={total:number;offset:number;limit:number;items:DocumentRecord[]};
 
-export default function DocumentsPage(){
+function DocumentsPage(){
   const [rows,setRows]=useState<DocumentRecord[]>([]);
   const [files,setFiles]=useState<FileMeta[]>([]);
   const [search,setSearch]=useState("");
@@ -166,4 +167,12 @@ export default function DocumentsPage(){
     </Modal>}
     <GlobalSpinStyle/>
   </>;
+}
+
+export default function Page() {
+  return (
+    <RequirePermission perm="documents.view">
+      <DocumentsPage />
+    </RequirePermission>
+  );
 }

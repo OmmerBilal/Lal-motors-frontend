@@ -4,6 +4,7 @@ import { Eye, Loader2, Pencil, Plus, RefreshCw, Search, Trash2 } from "lucide-re
 import { FormEvent, useCallback, useEffect, useMemo, useState } from "react";
 
 import { DetailGrid, EmptyRow, Field, GlobalSpinStyle, LoadingRow, Message, Modal, TextAreaField } from "@/components/RealUi";
+import { RequirePermission } from "@/components/RequirePermission";
 import { CurrentUser, apiFetch, getCurrentUser } from "@/lib/api";
 
 type History={shipment_id:string;shipment_number:string;shipment_status:string;shipment_container_id:string;seal_number:string|null;actual_cbm:number|string|null;container_status:string};
@@ -11,7 +12,7 @@ type ContainerRow={id:string;business_unit_id:string;container_number:string;con
 type ListResponse={total:number;offset:number;limit:number;items:ContainerRow[]};
 const empty={container_number:"",container_type:"",tare_weight_kg:"",max_cbm:"",notes:""};
 
-export default function ContainersPage(){
+function ContainersPage(){
  const [rows,setRows]=useState<ContainerRow[]>([]);const [search,setSearch]=useState("");const [loading,setLoading]=useState(true);const [error,setError]=useState("");const [success,setSuccess]=useState("");const [mode,setMode]=useState<"create"|"view"|"edit"|null>(null);const [selected,setSelected]=useState<ContainerRow|null>(null);const [form,setForm]=useState(empty);const [saving,setSaving]=useState(false);const [user,setUser]=useState<CurrentUser|null>(null);
  const isManager=useMemo(()=>{const r=new Set((user?.roles||[]).map(x=>x.toLowerCase()));return r.has("manager")||r.has("administrator")},[user]);
  const load=useCallback(async()=>{setLoading(true);try{const p=new URLSearchParams();if(search.trim())p.set("search",search.trim());p.set("limit","300");const r=await apiFetch<ListResponse>(`/containers?${p}`);setRows(r.items)}catch(e:any){setError(e?.message||"Unable to load containers.")}finally{setLoading(false)}},[search]);
@@ -25,4 +26,12 @@ export default function ContainersPage(){
  {(mode==="create"||mode==="edit")&&<Modal title={mode==="create"?"Add Container":`Edit ${selected?.container_number||"Container"}`} eyebrow="Logistics" onClose={()=>setMode(null)}><form onSubmit={save}><div className="form-grid"><Field label="Container Number" value={form.container_number} onChange={v=>setField("container_number",v)} required/><Field label="Container Type" value={form.container_type} onChange={v=>setField("container_type",v)} placeholder="40HC, 20GP..."/><Field label="Tare Weight (kg)" type="number" min="0" step="0.01" value={form.tare_weight_kg} onChange={v=>setField("tare_weight_kg",v)}/><Field label="Max CBM" type="number" min="0" step="0.01" value={form.max_cbm} onChange={v=>setField("max_cbm",v)}/><TextAreaField label="Notes" value={form.notes} onChange={v=>setField("notes",v)}/></div><div style={{display:"flex",justifyContent:"flex-end",gap:8,marginTop:18}}><button type="button" className="btn btn-secondary" onClick={()=>setMode(null)}>Cancel</button><button className="btn btn-primary" disabled={saving}>{saving?<><Loader2 className="spin" size={15}/>Saving...</>:"Save Container"}</button></div></form></Modal>}
  {mode==="view"&&selected&&<Modal title={selected.container_number} eyebrow="Container Details" onClose={()=>setMode(null)} width={900}><DetailGrid rows={[["Type",selected.container_type||"—"],["Tare Weight",selected.tare_weight_kg??"—"],["Max CBM",selected.max_cbm??"—"],["Items",selected.item_count],["Total Quantity",Number(selected.total_quantity)],["Notes",selected.notes||"—"]]}/><div className="panel-head" style={{marginTop:22}}><h3>Shipment History</h3></div><div className="table-wrap"><table><thead><tr><th>Shipment</th><th>Shipment Status</th><th>Container Status</th><th>Seal</th><th>CBM</th></tr></thead><tbody>{selected.shipment_history.length===0?<EmptyRow columns={5} text="No shipment history."/>:selected.shipment_history.map(h=><tr key={h.shipment_container_id}><td>{h.shipment_number}</td><td>{h.shipment_status}</td><td>{h.container_status}</td><td>{h.seal_number||"—"}</td><td>{h.actual_cbm??"—"}</td></tr>)}</tbody></table></div></Modal>}
  <GlobalSpinStyle/></>;
+}
+
+export default function Page() {
+  return (
+    <RequirePermission perm="containers.view">
+      <ContainersPage />
+    </RequirePermission>
+  );
 }

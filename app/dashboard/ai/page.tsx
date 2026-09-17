@@ -1,8 +1,9 @@
 "use client";
 
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
-  Bot, CheckCircle2, Code2, History, Loader2, Mic, Plus,
-  RefreshCw, Send, Sparkles, Square, XCircle,
+  Bot, CheckCircle2, Code2, Download, History, ImagePlus, Loader2, Mic, Plus,
+  RefreshCw, Send, Sparkles, Square, ThumbsUp, Wand2, X, XCircle,
 } from "lucide-react";
 import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
 
@@ -10,7 +11,10 @@ import {
   EmptyRow, Field, GlobalSpinStyle, Message,
   Modal, SelectField, StatusBadge, TextAreaField, labelize,
 } from "@/components/RealUi";
-import { CurrentUser, apiFetch, getCurrentUser } from "@/lib/api";
+import { RequirePermission } from "@/components/RequirePermission";
+import { API_BASE_URL, CurrentUser, apiFetch, apiUpload, getCurrentUser } from "@/lib/api";
+import { invalidate } from "@/lib/invalidate";
+import { queryKeys } from "@/lib/queryKeys";
 
 type FunctionDefinition={
   id:string;name:string;description:string;version:number;input_schema:any;handler_type:string;handler_key:string|null;
@@ -26,8 +30,56 @@ type FunctionCall={id:string;ai_request_id:string;function_definition_id:string;
   extracted_arguments:any;approval_request_id:string|null;status:string;result:any;error_message:string|null;
   started_at:string|null;completed_at:string|null;created_at:string};
 
-const historyTabs=["Requests","Approvals","Functions","Function Calls"] as const;
+const historyTabs=["Requests","Approvals","Functions","Function Calls","Content Sessions"] as const;
 type HistoryTab=(typeof historyTabs)[number];
+
+// ---- AI Product Content Studio (Phase 9) ---------------------------------
+type ChannelName="shopify"|"ebay"|"meta"|"tiktok";
+const STUDIO_CHANNELS:{value:ChannelName;label:string}[]=[
+  {value:"shopify",label:"Shopify"},{value:"ebay",label:"eBay"},
+  {value:"meta",label:"Instagram + Facebook"},{value:"tiktok",label:"TikTok"},
+];
+type MasterProductDraft={
+  id:string;product_name:string;brand:string|null;model:string|null;category:string|null;condition:string|null;
+  description:string;price:number|string|null;sku:string|null;quantity:number|null;
+  missing_information:string[];confidence_notes:string[];current_version:number;
+};
+type ChannelDraft={
+  id:string;session_id:string;master_draft_id:string;channel:ChannelName;platform:string|null;status:string;
+  current_version:number;payload:Record<string,any>;missing_information:string[];product_name?:string;updated_at:string;
+};
+type GenerateResponse={
+  session_id:string;master_draft:MasterProductDraft;model_used:string;
+  channel_results:{channel:ChannelName;status:"success"|"failed";draft?:ChannelDraft;error?:string}[];
+};
+type ContentSession={
+  id:string;input_text:string;status:string;created_at:string;requested_channels:ChannelName[]|null;product_name:string|null;
+};
+type StudioAction={kind:"content_studio_result";sessionId:string;masterDraft:MasterProductDraft;channelResults:GenerateResponse["channel_results"]};
+
+function draftTitle(d:ChannelDraft):string{
+  return d.payload?.title
+    ||d.payload?.hook
+    ||d.payload?.primary_caption
+    ||d.payload?.instagram?.primary_caption
+    ||d.payload?.facebook?.caption
+    ||d.payload?.caption
+    ||"(untitled)";
+}
+
+function downloadDraft(id:string,format:"json"|"csv"|"txt"){
+  const a=document.createElement("a");
+  a.href=`${API_BASE_URL}/ai/studio/drafts/${id}/export?format=${format}`;
+  a.download="";
+  document.body.appendChild(a);a.click();document.body.removeChild(a);
+}
+
+function downloadSessionAll(sessionId:string){
+  const a=document.createElement("a");
+  a.href=`${API_BASE_URL}/ai/studio/sessions/${sessionId}/export/all`;
+  a.download="";
+  document.body.appendChild(a);a.click();document.body.removeChild(a);
+}
 
 // Server response shapes for POST /ai/chat — the real Groq-backed orchestrator
 // decides intent and calls a registered backend function; the frontend just renders it.
@@ -45,9 +97,14 @@ type ChatApiResponse={
 type ChatAction=
   | {kind:"result"}
   | {kind:"pending_approval";approvalId:string;functionName:string;args:Record<string,any>;status:"pending"|"approved"|"rejected"}
-  | {kind:"error"};
+  | {kind:"error"}
+  | {kind:"channel_drafts";sessionId:string;productName:string;drafts:ChannelDraft[];masterDraft?:MasterProductDraft|null}
+  | {kind:"generated_image";fileId:string;productName?:string|null}
+  | StudioAction;
 
-type ChatMessage={id:string;role:"user"|"assistant";text:string;action?:ChatAction;createdAt:string};
+type ChatAttachment={previewUrl:string;fileId?:string};
+
+type ChatMessage={id:string;role:"user"|"assistant";text:string;action?:ChatAction;attachments?:ChatAttachment[];createdAt:string};
 
 const QUICK_CHIPS=[
   {label:"Create sale",template:"Ahmed bought 1 Civic headlight for $100 and paid $90 cash."},
@@ -57,9 +114,26 @@ const QUICK_CHIPS=[
   {label:"Create purchase order",template:"Create a purchase order with ABC supplier for 10 brake pads."},
 ];
 
+function mediaUrl(fileId:string){
+  return `${API_BASE_URL}/ai/studio/media/${fileId}`;
+}
+
 function uid(){
   if(typeof crypto!=="undefined"&&"randomUUID" in crypto) return crypto.randomUUID();
   return `id-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+}
+
+function MessageAttachments({attachments}:{attachments?:ChatAttachment[]}){
+  if(!attachments||attachments.length===0)return null;
+  return <div style={{display:"flex",gap:8,flexWrap:"wrap",marginTop:8,marginBottom:6}}>
+    {attachments.map((a,i)=>{
+      const src=a.previewUrl||(a.fileId?mediaUrl(a.fileId):"");
+      if(!src) return null;
+      return <a key={i} href={a.fileId?mediaUrl(a.fileId):src} target="_blank" rel="noreferrer">
+        <img src={src} alt="Attachment" style={{width:96,height:96,objectFit:"cover",borderRadius:10,border:"1px solid var(--line)"}}/>
+      </a>;
+    })}
+  </div>;
 }
 
 function parsePairs(text:string):{label:string;value:string}[]{
@@ -92,7 +166,53 @@ function ResultCard({text}:{text:string}){
   </div>;
 }
 
-export default function AIPage(){
+function ChannelDraftCard({draft,onAskAI,onRegenerate,onApprove,busy}:{
+  draft:ChannelDraft;onAskAI:(d:ChannelDraft)=>void;onRegenerate:(d:ChannelDraft)=>void;onApprove:(d:ChannelDraft)=>void;busy:boolean;
+}){
+  const label=STUDIO_CHANNELS.find(c=>c.value===draft.channel)?.label||draft.channel;
+  return <div className="card" style={{padding:14,minWidth:240,flex:"1 1 260px"}}>
+    <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",gap:8}}>
+      <div><div className="eyebrow">{label}</div><strong style={{fontSize:14}}>{draftTitle(draft)}</strong></div>
+      <StatusBadge value={draft.status}/>
+    </div>
+    <div className="muted" style={{fontSize:11,marginTop:4}}>v{draft.current_version}</div>
+    {draft.payload?.price!=null&&<div className="muted" style={{fontSize:12,marginTop:6}}>Price: {String(draft.payload.price)}</div>}
+    {draft.payload?.seo_title&&<div className="muted" style={{fontSize:12,marginTop:4}}>SEO title: {String(draft.payload.seo_title)}</div>}
+    {Array.isArray(draft.payload?.tags)&&draft.payload.tags.length>0&&<div className="muted" style={{fontSize:12,marginTop:4}}>Tags: {draft.payload.tags.join(", ")}</div>}
+    {draft.payload?.description&&<p style={{fontSize:12,marginTop:8,lineHeight:1.5}}>{String(draft.payload.description).slice(0,160)}{String(draft.payload.description).length>160?"…":""}</p>}
+    {(draft.payload?.caption||draft.payload?.instagram?.primary_caption)&&<p style={{fontSize:12,marginTop:8,lineHeight:1.5}}>{String(draft.payload.caption||draft.payload?.instagram?.primary_caption).slice(0,160)}</p>}
+    {draft.missing_information?.length>0&&<div className="muted" style={{fontSize:11,marginTop:8}}>Missing: {draft.missing_information.join(", ")}</div>}
+    <div style={{display:"flex",gap:6,flexWrap:"wrap",marginTop:12}}>
+      <button className="btn btn-ghost" style={{fontSize:11,padding:"6px 9px"}} disabled={busy} onClick={()=>onAskAI(draft)}><Wand2 size={12}/>Ask AI</button>
+      <button className="btn btn-ghost" style={{fontSize:11,padding:"6px 9px"}} disabled={busy} onClick={()=>onRegenerate(draft)}><RefreshCw size={12}/>Regenerate</button>
+      {draft.status!=="approved"&&<button className="btn btn-ghost" style={{fontSize:11,padding:"6px 9px"}} disabled={busy} onClick={()=>onApprove(draft)}><ThumbsUp size={12}/>Approve</button>}
+      <button className="btn btn-ghost" style={{fontSize:11,padding:"6px 9px"}} onClick={()=>navigator.clipboard?.writeText(JSON.stringify(draft.payload,null,2))}>Copy</button>
+      <button className="btn btn-ghost" style={{fontSize:11,padding:"6px 9px"}} onClick={()=>downloadDraft(draft.id,"json")}><Download size={12}/>JSON</button>
+      {(draft.channel==="shopify"||draft.channel==="ebay")&&<button className="btn btn-ghost" style={{fontSize:11,padding:"6px 9px"}} onClick={()=>downloadDraft(draft.id,"csv")}><Download size={12}/>CSV</button>}
+      {(draft.channel==="meta"||draft.channel==="tiktok")&&<button className="btn btn-ghost" style={{fontSize:11,padding:"6px 9px"}} onClick={()=>downloadDraft(draft.id,"txt")}><Download size={12}/>TXT</button>}
+    </div>
+  </div>;
+}
+
+function GeneratedImageCard({fileId,productName,onUse}:{
+  fileId:string;productName?:string|null;onUse:(text:string,fileIds:string[])=>void;
+}){
+  return <div style={{marginTop:10}}>
+    <img src={mediaUrl(fileId)} alt="Generated marketplace image" style={{maxWidth:"100%",borderRadius:12,border:"1px solid var(--line)"}}/>
+    <div style={{display:"flex",gap:6,flexWrap:"wrap",marginTop:10}}>
+      <a className="btn btn-ghost" style={{fontSize:11,padding:"6px 9px"}} href={mediaUrl(fileId)} download><Download size={12}/>Download</a>
+      <button className="btn btn-ghost" style={{fontSize:11,padding:"6px 9px"}} onClick={()=>onUse("Regenerate a clean professional marketplace image for this product.",[fileId])}><RefreshCw size={12}/>Regenerate</button>
+      {(["shopify","meta","tiktok"] as ChannelName[]).map(ch=>
+        <button key={ch} className="btn btn-ghost" style={{fontSize:11,padding:"6px 9px"}}
+          onClick={()=>onUse(`Create a ${ch} draft for ${productName||"this product"} using this image.`,[fileId])}>
+          Use in {ch==="meta"?"Meta":ch[0].toUpperCase()+ch.slice(1)}
+        </button>
+      )}
+    </div>
+  </div>;
+}
+
+function AIPage(){
   const [view,setView]=useState<"chat"|"history">("chat");
   const [historyTab,setHistoryTab]=useState<HistoryTab>("Requests");
   const [functions,setFunctions]=useState<FunctionDefinition[]>([]);
@@ -117,6 +237,34 @@ export default function AIPage(){
   const [voiceSupported,setVoiceSupported]=useState(false);
   const recognitionRef=useRef<any>(null);
   const bottomRef=useRef<HTMLDivElement>(null);
+  const fileInputRef=useRef<HTMLInputElement>(null);
+  const queryClient=useQueryClient();
+
+  // Optional channel chips hint the backend which drafts to create.
+  // Attaching an image does NOT by itself start Content Studio generation.
+  const [attachedImages,setAttachedImages]=useState<{file:File;previewUrl:string}[]>([]);
+  const [studioChannels,setStudioChannels]=useState<ChannelName[]>([]);
+  const [activeStudio,setActiveStudio]=useState<{sessionId:string;productName:string}|null>(null);
+  const [studioBusyDraftId,setStudioBusyDraftId]=useState<string|null>(null);
+
+  const contentSessionsQuery=useQuery({
+    queryKey:queryKeys.contentStudio.sessions(),
+    queryFn:()=>apiFetch<ContentSession[]>("/ai/studio/sessions"),
+    enabled:view==="history"&&historyTab==="Content Sessions",
+    staleTime:30*1000,
+  });
+
+  function addImages(files:FileList|null){
+    if(!files)return;
+    const next=Array.from(files).slice(0,8-attachedImages.length).map(file=>({file,previewUrl:URL.createObjectURL(file)}));
+    setAttachedImages(cur=>[...cur,...next].slice(0,8));
+  }
+  function removeImage(idx:number){
+    setAttachedImages(cur=>cur.filter((_,i)=>i!==idx));
+  }
+  function toggleStudioChannel(ch:ChannelName){
+    setStudioChannels(cur=>cur.includes(ch)?cur.filter(c=>c!==ch):[...cur,ch]);
+  }
 
   const [functionForm,setFunctionForm]=useState({
     name:"",description:"",version:"1",handler_type:"internal",handler_key:"",
@@ -131,24 +279,48 @@ export default function AIPage(){
     return r.has("administrator")||r.has("manager");
   },[user]);
 
+  // Functions/Requests/Approvals/Function-Calls are admin-oversight tabs
+  // (settings.manage / approvals.view) — hide them entirely for an employee
+  // who only holds ai.use, rather than showing a tab that's always empty.
+  const visibleHistoryTabs=useMemo(()=>{
+    const perms=new Set(user?.permissions||[]);
+    return historyTabs.filter(t=>{
+      if(t==="Functions")return perms.has("settings.manage");
+      if(t==="Requests"||t==="Approvals"||t==="Function Calls")return perms.has("approvals.view");
+      return true;
+    });
+  },[user]);
+
   const pendingApprovals=useMemo(()=>approvals.filter(a=>a.status==="pending").length,[approvals]);
 
   async function load(){
     setLoading(true);setError("");
     try{
-      const [me,f,r,a,c]=await Promise.all([
-        getCurrentUser(),
-        apiFetch<FunctionDefinition[]>("/ai-admin/functions"),
-        apiFetch<AIRequest[]>("/ai-admin/requests?limit=100"),
-        apiFetch<Approval[]>("/ai-admin/approvals?limit=100"),
-        apiFetch<FunctionCall[]>("/ai-admin/function-calls?limit=100"),
+      const me=await getCurrentUser();
+      setUser(me);
+      const perms=new Set(me.permissions||[]);
+
+      // The Functions/Requests/Approvals/Function-Calls admin tabs are
+      // genuinely admin-only surfaces (settings.manage / approvals.view) —
+      // fetching them for every employee who merely has ai.use would 403
+      // and surface a scary permission error on a page everyone can open.
+      const [f,r,a,c]=await Promise.all([
+        perms.has("settings.manage")?apiFetch<FunctionDefinition[]>("/ai-admin/functions"):Promise.resolve([]),
+        perms.has("approvals.view")?apiFetch<AIRequest[]>("/ai-admin/requests?limit=100"):Promise.resolve([]),
+        perms.has("approvals.view")?apiFetch<Approval[]>("/ai-admin/approvals?limit=100"):Promise.resolve([]),
+        perms.has("approvals.view")?apiFetch<FunctionCall[]>("/ai-admin/function-calls?limit=100"):Promise.resolve([]),
       ]);
-      setUser(me);setFunctions(f);setRequests(r);setApprovals(a);setCalls(c);
+      setFunctions(f);setRequests(r);setApprovals(a);setCalls(c);
     }catch(e:any){setError(e?.message||"Unable to load AI Command Center data.");}
     finally{setLoading(false);}
   }
 
   useEffect(()=>{load();},[]);
+  useEffect(()=>{
+    if(!visibleHistoryTabs.includes(historyTab)&&visibleHistoryTabs.length>0){
+      setHistoryTab(visibleHistoryTabs[0]);
+    }
+  },[visibleHistoryTabs,historyTab]);
   useEffect(()=>{bottomRef.current?.scrollIntoView({behavior:"smooth"});},[messages,sending]);
 
   useEffect(()=>{
@@ -176,17 +348,58 @@ export default function AIPage(){
     setMessages(m=>[...m,{id:uid(),role:"assistant",text,action,createdAt:new Date().toISOString()}]);
   }
 
-  async function sendMessage(rawText?:string){
-    const text=(rawText??composer).trim();
+  async function sendMessage(rawText?:string, extraFileIds?:string[]){
+    const images=attachedImages;
+    const text=(rawText??composer).trim() || (images.length>0 || (extraFileIds&&extraFileIds.length>0) ? "Please look at the attached image." : "");
     if(!text||sending) return;
+    const localAttachments:ChatAttachment[]=images.map(i=>({previewUrl:i.previewUrl}));
     setComposer("");setError("");
-    setMessages(m=>[...m,{id:uid(),role:"user",text,createdAt:new Date().toISOString()}]);
+    const userMsgId=uid();
+    setMessages(m=>[...m,{id:userMsgId,role:"user",text,attachments:localAttachments,createdAt:new Date().toISOString()}]);
+    setAttachedImages([]);
     setSending(true);
     try{
-      const res=await apiFetch<ChatApiResponse>("/ai/chat",{method:"POST",body:JSON.stringify({message:text})});
+      let fileIds=[...(extraFileIds||[])];
+      if(images.length>0){
+        const form=new FormData();
+        images.forEach(i=>form.append("files",i.file));
+        const uploaded=await apiUpload<{files:{file_id:string}[]}>("/ai/chat/uploads",form);
+        fileIds=[...fileIds,...uploaded.files.map(f=>f.file_id)];
+        setMessages(ms=>ms.map(msg=>msg.id===userMsgId?{
+          ...msg,
+          attachments:uploaded.files.map((f,i)=>({
+            previewUrl:localAttachments[i]?.previewUrl||mediaUrl(f.file_id),
+            fileId:f.file_id,
+          })),
+        }:msg));
+      }else if(fileIds.length>0){
+        setMessages(ms=>ms.map(msg=>msg.id===userMsgId?{
+          ...msg,
+          attachments:fileIds.map(id=>({previewUrl:mediaUrl(id),fileId:id})),
+        }:msg));
+      }
+
+      const res=await apiFetch<ChatApiResponse>("/ai/chat",{method:"POST",body:JSON.stringify({
+        message:text,
+        image_file_ids:fileIds,
+        channels:studioChannels,
+      })});
 
       if(res.type==="pending_approval"&&res.approval_id&&res.function){
         pushAssistant(res.text,{kind:"pending_approval",approvalId:res.approval_id,functionName:res.function,args:res.arguments||{},status:"pending"});
+      }else if(res.type==="result"&&res.function==="create_channel_drafts"){
+        const drafts=(res.result?.drafts||[]) as ChannelDraft[];
+        setActiveStudio({sessionId:res.result?.session_id,productName:res.result?.product_name||"this product"});
+        pushAssistant(res.text,{
+          kind:"channel_drafts",
+          sessionId:res.result?.session_id,
+          productName:res.result?.product_name||"this product",
+          drafts,
+          masterDraft:res.result?.master_draft||null,
+        });
+        invalidate(queryClient,["contentStudio"]);
+      }else if(res.type==="result"&&res.function==="generate_marketplace_image"&&res.result?.file_id){
+        pushAssistant(res.text,{kind:"generated_image",fileId:res.result.file_id,productName:res.result.product_name});
       }else if(res.type==="result"){
         pushAssistant(res.text,{kind:"result"});
       }else if(res.type==="error"){
@@ -198,10 +411,62 @@ export default function AIPage(){
       apiFetch<AIRequest[]>("/ai-admin/requests?limit=100").then(setRequests).catch(()=>{});
       apiFetch<Approval[]>("/ai-admin/approvals?limit=100").then(setApprovals).catch(()=>{});
     }catch(e:any){
-      pushAssistant(`Sorry — something went wrong: ${e?.message||"unknown error"}.`,{kind:"error"});
+      pushAssistant(`Sorry — ${e?.message||"something went wrong"}.`,{kind:"error"});
     }finally{
       setSending(false);
     }
+  }
+
+  async function askAIOnDraft(draft:ChannelDraft){
+    const instruction=prompt(`What should change on this ${draft.channel} draft?`,"");
+    if(!instruction)return;
+    setStudioBusyDraftId(draft.id);
+    try{
+      const res=await apiFetch<any>(`/ai/studio/sessions/${draft.session_id}/revise`,{
+        method:"POST",body:JSON.stringify({instruction,channel:draft.channel,scope:"channel"}),
+      });
+      pushAssistant(`Revised the ${draft.channel} draft: "${instruction}"`,
+        {kind:"content_studio_result",sessionId:draft.session_id,masterDraft:{} as any,
+          channelResults:[{channel:draft.channel,status:"success",draft:res.draft}]});
+      invalidate(queryClient,["contentStudio"]);
+    }catch(e:any){setError(e?.message||"Unable to revise draft.");}
+    finally{setStudioBusyDraftId(null);}
+  }
+
+  async function regenerateDraft(draft:ChannelDraft){
+    setStudioBusyDraftId(draft.id);
+    try{
+      const updated=await apiFetch<ChannelDraft>(`/ai/studio/drafts/${draft.id}/regenerate`,{method:"POST"});
+      pushAssistant(`Regenerated the ${draft.channel} draft.`,
+        {kind:"content_studio_result",sessionId:draft.session_id,masterDraft:{} as any,
+          channelResults:[{channel:draft.channel,status:"success",draft:updated}]});
+      invalidate(queryClient,["contentStudio"]);
+    }catch(e:any){setError(e?.message||"Unable to regenerate draft.");}
+    finally{setStudioBusyDraftId(null);}
+  }
+
+  async function reopenSession(sessionId:string){
+    try{
+      const full=await apiFetch<{master_draft:MasterProductDraft|null;channel_drafts:ChannelDraft[]}>(`/ai/studio/sessions/${sessionId}`);
+      setView("chat");
+      if(full.master_draft){
+        setActiveStudio({sessionId,productName:full.master_draft.product_name||"this product"});
+        pushAssistant(`Reopened "${full.master_draft.product_name||"this product"}".`,{
+          kind:"content_studio_result",sessionId,masterDraft:full.master_draft,
+          channelResults:full.channel_drafts.map(d=>({channel:d.channel,status:"success" as const,draft:d})),
+        });
+      }
+    }catch(e:any){setError(e?.message||"Unable to reopen session.");}
+  }
+
+  async function approveDraft(draft:ChannelDraft){
+    setStudioBusyDraftId(draft.id);
+    try{
+      await apiFetch(`/ai/studio/drafts/${draft.id}/approve`,{method:"POST"});
+      setSuccess(`${draft.channel} draft approved.`);
+      invalidate(queryClient,["contentStudio"]);
+    }catch(e:any){setError(e?.message||"Unable to approve draft.");}
+    finally{setStudioBusyDraftId(null);}
   }
 
   async function decideChatApproval(msg:ChatMessage,decision:"approve"|"reject"){
@@ -301,7 +566,9 @@ export default function AIPage(){
                 <Bot size={13}/>Assistant
               </div>}
 
-              {msg.role==="assistant"&&msg.action?.kind==="result"
+              <MessageAttachments attachments={msg.attachments}/>
+
+              {msg.role==="assistant"&&(msg.action?.kind==="result"||msg.action?.kind==="channel_drafts")
                 ?<ResultCard text={msg.text}/>
                 :<div style={{fontSize:14,lineHeight:1.55,whiteSpace:"pre-wrap"}}>{msg.text}</div>}
 
@@ -326,6 +593,58 @@ export default function AIPage(){
                   {msg.action.status==="pending"&&!isManager&&<span className="muted" style={{fontSize:12}}>Waiting for a Manager/Administrator to approve.</span>}
                 </div>
               </>}
+
+              {msg.action?.kind==="generated_image"&&
+                <GeneratedImageCard fileId={msg.action.fileId} productName={msg.action.productName} onUse={sendMessage}/>}
+
+              {msg.action?.kind==="channel_drafts"&&<div style={{marginTop:10,width:"min(640px, 60vw)"}}>
+                {msg.action.masterDraft?.product_name&&<div className="card" style={{padding:12,marginBottom:10,background:"var(--bg-elev)"}}>
+                  <div className="eyebrow">Product Analysis</div>
+                  <div style={{display:"grid",gridTemplateColumns:"repeat(2,1fr)",gap:8,marginTop:6}}>
+                    <div><div className="muted" style={{fontSize:11}}>Product</div><strong>{msg.action.masterDraft.product_name}</strong></div>
+                    <div><div className="muted" style={{fontSize:11}}>Condition</div><strong>{msg.action.masterDraft.condition||"—"}</strong></div>
+                    <div><div className="muted" style={{fontSize:11}}>Brand</div><strong>{msg.action.masterDraft.brand||"—"}</strong></div>
+                    <div><div className="muted" style={{fontSize:11}}>Price</div><strong>{msg.action.masterDraft.price!=null?String(msg.action.masterDraft.price):"—"}</strong></div>
+                  </div>
+                </div>}
+                <div style={{display:"flex",gap:10,flexWrap:"wrap"}}>
+                  {msg.action.drafts.map(d=>
+                    <ChannelDraftCard key={d.id} draft={d} onAskAI={askAIOnDraft} onRegenerate={regenerateDraft}
+                      onApprove={approveDraft} busy={studioBusyDraftId===d.id}/>
+                  )}
+                </div>
+                {msg.action.sessionId&&<button className="btn btn-ghost" style={{fontSize:11,padding:"6px 9px",marginTop:10}}
+                  onClick={()=>downloadSessionAll(msg.action?.kind==="channel_drafts"?msg.action.sessionId:"")}>
+                  <Download size={12}/>Download All
+                </button>}
+              </div>}
+
+              {msg.action?.kind==="content_studio_result"&&<div style={{marginTop:10,width:"min(640px, 60vw)"}}>
+                {msg.action.masterDraft?.product_name&&<div className="card" style={{padding:12,marginBottom:10,background:"var(--bg-elev)"}}>
+                  <div className="eyebrow">Product Analysis</div>
+                  <div style={{display:"grid",gridTemplateColumns:"repeat(2,1fr)",gap:8,marginTop:6}}>
+                    <div><div className="muted" style={{fontSize:11}}>Product</div><strong>{msg.action.masterDraft.product_name}</strong></div>
+                    <div><div className="muted" style={{fontSize:11}}>Condition</div><strong>{msg.action.masterDraft.condition||"—"}</strong></div>
+                    <div><div className="muted" style={{fontSize:11}}>Brand</div><strong>{msg.action.masterDraft.brand||"—"}</strong></div>
+                    <div><div className="muted" style={{fontSize:11}}>Price</div><strong>{msg.action.masterDraft.price!=null?`$${msg.action.masterDraft.price}`:"—"}</strong></div>
+                  </div>
+                  {msg.action.masterDraft.missing_information?.length>0&&
+                    <div className="muted" style={{fontSize:11,marginTop:8}}>Missing information: {msg.action.masterDraft.missing_information.join(", ")}</div>}
+                </div>}
+                <div style={{display:"flex",gap:10,flexWrap:"wrap"}}>
+                  {msg.action.channelResults.map(r=>r.status==="success"&&r.draft
+                    ?<ChannelDraftCard key={r.draft.id} draft={r.draft} onAskAI={askAIOnDraft} onRegenerate={regenerateDraft}
+                        onApprove={approveDraft} busy={studioBusyDraftId===r.draft.id}/>
+                    :<div key={r.channel} className="card" style={{padding:12,minWidth:200,color:"var(--danger)",fontSize:12}}>
+                        <strong>{r.channel}</strong> failed: {r.error}
+                      </div>
+                  )}
+                </div>
+                <button className="btn btn-ghost" style={{fontSize:11,padding:"6px 9px",marginTop:10}}
+                  onClick={()=>downloadSessionAll(msg.action?.kind==="content_studio_result"?msg.action.sessionId:"")}>
+                  <Download size={12}/>Download All
+                </button>
+              </div>}
             </div>
           </div>
         )}
@@ -336,6 +655,28 @@ export default function AIPage(){
       </div>
 
       <div style={{padding:16,borderTop:"1px solid var(--line)"}}>
+        {activeStudio&&<div className="card" style={{padding:"8px 12px",marginBottom:10,display:"flex",alignItems:"center",justifyContent:"space-between",background:"var(--bg-elev)"}}>
+          <span style={{fontSize:12}}><Wand2 size={12} style={{marginRight:6,verticalAlign:"-2px"}}/>Recent drafts for <strong>{activeStudio.productName}</strong> — use Ask AI on a card to revise. Other questions stay in this chat.</span>
+          <button className="btn btn-ghost" style={{fontSize:11,padding:"4px 8px"}} onClick={()=>setActiveStudio(null)}>Dismiss</button>
+        </div>}
+
+        {attachedImages.length>0&&<div style={{display:"flex",gap:8,flexWrap:"wrap",marginBottom:10}}>
+          {attachedImages.map((img,i)=><div key={i} style={{position:"relative",width:56,height:56,borderRadius:8,overflow:"hidden",border:"1px solid var(--line)"}}>
+            <img src={img.previewUrl} alt={img.file.name} style={{width:"100%",height:"100%",objectFit:"cover"}}/>
+            <button type="button" onClick={()=>removeImage(i)} style={{position:"absolute",top:2,right:2,background:"rgba(0,0,0,.6)",border:"none",borderRadius:6,color:"#fff",width:18,height:18,display:"grid",placeItems:"center",cursor:"pointer"}}>
+              <X size={11}/>
+            </button>
+          </div>)}
+        </div>}
+
+        {attachedImages.length>0&&<div style={{display:"flex",gap:6,flexWrap:"wrap",marginBottom:10}}>
+          <span className="muted" style={{fontSize:11,alignSelf:"center"}}>Draft channels (optional — used only if you ask to create drafts):</span>
+          {STUDIO_CHANNELS.map(c=>
+            <button key={c.value} type="button" className={`btn ${studioChannels.includes(c.value)?"btn-primary":"btn-ghost"}`}
+              style={{fontSize:11,padding:"5px 10px"}} onClick={()=>toggleStudioChannel(c.value)}>{c.label}</button>
+          )}
+        </div>}
+
         <div style={{display:"flex",gap:7,flexWrap:"wrap",marginBottom:10}}>
           {QUICK_CHIPS.map(c=>
             <button key={c.label} type="button" className="btn btn-ghost" style={{fontSize:12,padding:"7px 12px"}}
@@ -343,10 +684,20 @@ export default function AIPage(){
           )}
         </div>
         <form onSubmit={e=>{e.preventDefault();sendMessage();}} style={{display:"flex",gap:8,alignItems:"flex-end"}}>
+          <input ref={fileInputRef} type="file" accept="image/jpeg,image/png,image/webp" multiple hidden
+            onChange={e=>{addImages(e.target.files);e.target.value="";}}/>
+          <button
+            type="button"
+            className="icon-btn"
+            title="Attach product images"
+            onClick={()=>fileInputRef.current?.click()}
+          >
+            <ImagePlus size={16}/>
+          </button>
           <textarea
             className="textarea"
             style={{minHeight:52,maxHeight:120,flex:1}}
-            placeholder="Ask anything about sales, inventory, customers, payments, purchases..."
+            placeholder={attachedImages.length>0?"Ask about this image, or request Shopify/Meta/TikTok drafts...":"Ask anything about sales, inventory, customers, payments, purchases..."}
             value={composer}
             onChange={e=>setComposer(e.target.value)}
             onKeyDown={e=>{if(e.key==="Enter"&&!e.shiftKey){e.preventDefault();sendMessage();}}}
@@ -361,18 +712,19 @@ export default function AIPage(){
           >
             {listening?<Square size={16}/>:<Mic size={16}/>}
           </button>
-          <button className="btn btn-primary" disabled={sending||!composer.trim()} style={{height:44}}><Send size={15}/>Send</button>
+          <button className="btn btn-primary" disabled={sending||(!composer.trim()&&attachedImages.length===0)} style={{height:44}}><Send size={15}/>Send</button>
         </form>
         <div className="muted" style={{fontSize:11,marginTop:8}}>
           Powered by a real language model with controlled backend functions — it can only act through
-          registered, audited actions, and larger actions need Manager approval first.
+          registered, audited actions, and larger actions need Manager approval first. Attach photos to
+          analyse them, generate marketplace images, or create channel drafts when you ask for those.
         </div>
       </div>
     </div>}
 
     {!loading&&view==="history"&&<>
       <div style={{display:"flex",gap:8,flexWrap:"wrap",marginBottom:16}}>
-        {historyTabs.map(x=><button key={x} className={`btn ${historyTab===x?"btn-primary":"btn-secondary"}`} onClick={()=>setHistoryTab(x)}>{x}</button>)}
+        {visibleHistoryTabs.map(x=><button key={x} className={`btn ${historyTab===x?"btn-primary":"btn-secondary"}`} onClick={()=>setHistoryTab(x)}>{x}</button>)}
       </div>
 
       {historyTab==="Requests"&&<>
@@ -416,6 +768,18 @@ export default function AIPage(){
           <tbody>{calls.length===0?<EmptyRow columns={6}/>:calls.map(c=><tr key={c.id}><td><strong>{c.function_name}</strong></td><td style={{fontSize:11}}>{c.ai_request_id}</td>
             <td>{c.sequence_number}</td><td><StatusBadge value={c.status}/></td><td>{c.error_message||"—"}</td><td>{new Date(c.created_at).toLocaleString()}</td></tr>)}</tbody></table></div>
       </>}
+
+      {historyTab==="Content Sessions"&&<>
+        <div className="records-toolbar card"><div><strong>AI Content Generation Sessions</strong><div className="muted" style={{fontSize:12}}>
+          Every product-content generation, with the channels it created. Reopen to view or keep revising.</div></div></div>
+        <div className="table-wrap"><table><thead><tr><th>Product / Prompt</th><th>Channels</th><th>Status</th><th>Created</th><th>Actions</th></tr></thead>
+          <tbody>{contentSessionsQuery.isLoading?<EmptyRow columns={5} text="Loading..."/>:(contentSessionsQuery.data||[]).length===0?<EmptyRow columns={5}/>:(contentSessionsQuery.data||[]).map(s=><tr key={s.id}>
+            <td><strong>{s.product_name||s.input_text.slice(0,60)}</strong></td>
+            <td>{(s.requested_channels||[]).map(ch=>STUDIO_CHANNELS.find(c=>c.value===ch)?.label||ch).join(", ")||"—"}</td>
+            <td><StatusBadge value={s.status}/></td><td>{new Date(s.created_at).toLocaleString()}</td>
+            <td><button className="btn btn-ghost" onClick={()=>reopenSession(s.id)}>Reopen</button></td>
+          </tr>)}</tbody></table></div>
+      </>}
     </>}
 
     {mode==="function"&&<Modal title="Create Controlled Function" eyebrow="AI Foundation" onClose={()=>setMode(null)} width={960}>
@@ -448,4 +812,12 @@ export default function AIPage(){
     </Modal>}
     <GlobalSpinStyle/>
   </>;
+}
+
+export default function Page() {
+  return (
+    <RequirePermission perm="ai.use">
+      <AIPage />
+    </RequirePermission>
+  );
 }

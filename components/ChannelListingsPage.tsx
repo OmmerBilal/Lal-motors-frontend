@@ -3,6 +3,7 @@
 import { Loader2, Pencil, Plus, RefreshCw, Search, Store } from "lucide-react";
 import { FormEvent, useEffect, useMemo, useState } from "react";
 
+import { AIDraftsSection } from "@/components/AIDraftsSection";
 import {
   EmptyRow, Field, GlobalSpinStyle, LoadingRow, Message,
   Modal, SelectField, StatusBadge, labelize, money,
@@ -129,6 +130,8 @@ export function ChannelListingsPage({
     </div>
 
     <Message error={error} success={success}/>
+
+    <AIDraftsSection provider={provider} title={title}/>
 
     <div className="card" style={{padding:13,marginBottom:15}}>
       <strong>Integration status</strong>
