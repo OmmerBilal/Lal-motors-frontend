@@ -2,7 +2,7 @@
 
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
-  Bot, CheckCircle2, Code2, Download, History, ImagePlus, Loader2, Mic, Plus,
+  CheckCircle2, ChevronDown, Code2, Download, History, ImagePlus, Loader2, Mic, Plus,
   RefreshCw, Send, Sparkles, Square, ThumbsUp, Wand2, X, XCircle,
 } from "lucide-react";
 import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
@@ -100,6 +100,7 @@ type ChatAction=
   | {kind:"error"}
   | {kind:"channel_drafts";sessionId:string;productName:string;drafts:ChannelDraft[];masterDraft?:MasterProductDraft|null}
   | {kind:"generated_image";fileId:string;productName?:string|null}
+  | {kind:"inventory_list";items:{product:string;location?:string;on_hand:number;reserved:number;available:number;status:string}[];label:string}
   | StudioAction;
 
 type ChatAttachment={previewUrl:string;fileId?:string};
@@ -125,12 +126,12 @@ function uid(){
 
 function MessageAttachments({attachments}:{attachments?:ChatAttachment[]}){
   if(!attachments||attachments.length===0)return null;
-  return <div style={{display:"flex",gap:8,flexWrap:"wrap",marginTop:8,marginBottom:6}}>
+  return <div className="ai-thumbs">
     {attachments.map((a,i)=>{
       const src=a.previewUrl||(a.fileId?mediaUrl(a.fileId):"");
       if(!src) return null;
       return <a key={i} href={a.fileId?mediaUrl(a.fileId):src} target="_blank" rel="noreferrer">
-        <img src={src} alt="Attachment" style={{width:96,height:96,objectFit:"cover",borderRadius:10,border:"1px solid var(--line)"}}/>
+        <img src={src} alt="Attachment"/>
       </a>;
     })}
   </div>;
@@ -151,8 +152,8 @@ function ResultCard({text}:{text:string}){
   const headline=lines.find(l=>l.toLowerCase().startsWith("completed successfully"));
   const note=lines.find(l=>l.toLowerCase().startsWith("note:"));
   const pairs=parsePairs(text);
-  if(pairs.length===0) return <div style={{fontSize:14,lineHeight:1.55,whiteSpace:"pre-wrap"}}>{text}</div>;
-  return <div className="card" style={{padding:14,marginTop:6,background:"var(--bg-elev)"}}>
+  if(pairs.length===0) return <div style={{fontSize:15,lineHeight:1.6,whiteSpace:"pre-wrap"}}>{text}</div>;
+  return <div style={{marginTop:4}}>
     {headline&&<div style={{display:"flex",alignItems:"center",gap:6,color:"var(--success)",fontWeight:800,fontSize:13,marginBottom:10}}>
       <CheckCircle2 size={14}/>{headline}
     </div>}
@@ -197,8 +198,8 @@ function ChannelDraftCard({draft,onAskAI,onRegenerate,onApprove,busy}:{
 function GeneratedImageCard({fileId,productName,onUse}:{
   fileId:string;productName?:string|null;onUse:(text:string,fileIds:string[])=>void;
 }){
-  return <div style={{marginTop:10}}>
-    <img src={mediaUrl(fileId)} alt="Generated marketplace image" style={{maxWidth:"100%",borderRadius:12,border:"1px solid var(--line)"}}/>
+  return <div className="ai-generated" style={{marginTop:10}}>
+    <img src={mediaUrl(fileId)} alt="Generated marketplace image"/>
     <div style={{display:"flex",gap:6,flexWrap:"wrap",marginTop:10}}>
       <a className="btn btn-ghost" style={{fontSize:11,padding:"6px 9px"}} href={mediaUrl(fileId)} download><Download size={12}/>Download</a>
       <button className="btn btn-ghost" style={{fontSize:11,padding:"6px 9px"}} onClick={()=>onUse("Regenerate a clean professional marketplace image for this product.",[fileId])}><RefreshCw size={12}/>Regenerate</button>
@@ -246,6 +247,7 @@ function AIPage(){
   const [studioChannels,setStudioChannels]=useState<ChannelName[]>([]);
   const [activeStudio,setActiveStudio]=useState<{sessionId:string;productName:string}|null>(null);
   const [studioBusyDraftId,setStudioBusyDraftId]=useState<string|null>(null);
+  const [shortcutsOpen,setShortcutsOpen]=useState(false);
 
   const contentSessionsQuery=useQuery({
     queryKey:queryKeys.contentStudio.sessions(),
@@ -400,6 +402,12 @@ function AIPage(){
         invalidate(queryClient,["contentStudio"]);
       }else if(res.type==="result"&&res.function==="generate_marketplace_image"&&res.result?.file_id){
         pushAssistant(res.text,{kind:"generated_image",fileId:res.result.file_id,productName:res.result.product_name});
+      }else if(res.type==="result"&&(res.function==="search_inventory"||(res.function==="check_inventory"&&Array.isArray(res.result?.items)))){
+        pushAssistant(res.text,{
+          kind:"inventory_list",
+          items:res.result?.items||[],
+          label:res.result?.filter_label||res.result?.query||"Inventory",
+        });
       }else if(res.type==="result"){
         pushAssistant(res.text,{kind:"result"});
       }else if(res.type==="error"){
@@ -535,194 +543,194 @@ function AIPage(){
     }catch(e:any){setError(e?.message||"Unable to decide approval.");}
   }
 
-  return <>
-    <div className="page-header">
+  const hasUserTurn=messages.some(m=>m.role==="user");
+  const showShortcuts=!hasUserTurn||shortcutsOpen;
+
+  return <div className={!loading&&view==="chat"?"ai-workspace":undefined}>
+    {view==="history"&&<div className="page-header" style={{padding:"26px 26px 0"}}>
       <div><div className="eyebrow">AI</div><h1 className="page-title">AI Command Center</h1>
-        <p className="page-copy">Give instructions to create sales, receive stock, record payments, and other business actions.</p></div>
+        <p className="page-copy">Request history, approvals and content sessions.</p></div>
       <div style={{display:"flex",gap:8}}>
         <button className="btn btn-secondary" onClick={load}><RefreshCw size={15}/>Refresh</button>
-        <button className={`btn ${view==="chat"?"btn-primary":"btn-secondary"}`} onClick={()=>setView("chat")}><Sparkles size={15}/>Chat</button>
-        <button className={`btn ${view==="history"?"btn-primary":"btn-secondary"}`} onClick={()=>setView("history")}>
-          <History size={15}/>History{pendingApprovals>0?` (${pendingApprovals} pending)`:""}
-        </button>
-      </div>
-    </div>
-
-    <Message error={error} success={success}/>
-
-    {loading&&<div className="card" style={{padding:30,textAlign:"center"}}><Loader2 className="spin" size={18}/> Loading...</div>}
-
-    {!loading&&view==="chat"&&<div className="card" style={{padding:0,display:"flex",flexDirection:"column",height:"min(74vh, 740px)"}}>
-      <div style={{flex:1,overflowY:"auto",padding:"22px 22px 6px",display:"flex",flexDirection:"column",gap:14}}>
-        {messages.map(msg=>
-          <div key={msg.id} style={{display:"flex",justifyContent:msg.role==="user"?"flex-end":"flex-start"}}>
-            <div style={{
-              maxWidth:"80%",padding:"12px 15px",borderRadius:16,
-              background:msg.role==="user"?"var(--accent)":msg.action?.kind==="error"?"color-mix(in srgb, var(--danger) 8%, var(--bg-soft))":"var(--bg-soft)",
-              color:msg.role==="user"?"#fff":"var(--text)",
-              border:msg.role==="user"?"none":msg.action?.kind==="error"?"1px solid color-mix(in srgb, var(--danger) 35%, var(--line))":"1px solid var(--line)",
-            }}>
-              {msg.role==="assistant"&&<div style={{display:"flex",alignItems:"center",gap:6,marginBottom:6,fontSize:11,fontWeight:800,color:"var(--accent)",textTransform:"uppercase",letterSpacing:".06em"}}>
-                <Bot size={13}/>Assistant
-              </div>}
-
-              <MessageAttachments attachments={msg.attachments}/>
-
-              {msg.role==="assistant"&&(msg.action?.kind==="result"||msg.action?.kind==="channel_drafts")
-                ?<ResultCard text={msg.text}/>
-                :<div style={{fontSize:14,lineHeight:1.55,whiteSpace:"pre-wrap"}}>{msg.text}</div>}
-
-              {msg.action?.kind==="pending_approval"&&<>
-                {Object.keys(msg.action.args).length>0&&
-                  <div className="card" style={{padding:12,marginTop:10,background:"var(--bg-elev)"}}>
-                    <div style={{display:"grid",gap:6}}>
-                      {Object.entries(msg.action.args).map(([k,v])=>
-                        <div key={k} style={{display:"flex",justifyContent:"space-between",gap:10,fontSize:13}}>
-                          <span className="muted">{labelize(k)}</span>
-                          <strong>{typeof v==="object"?JSON.stringify(v):String(v)}</strong>
-                        </div>
-                      )}
-                    </div>
-                  </div>}
-                <div style={{marginTop:10,display:"flex",alignItems:"center",gap:10,flexWrap:"wrap"}}>
-                  <StatusBadge value={msg.action.status}/>
-                  {msg.action.status==="pending"&&isManager&&<div style={{display:"flex",gap:8}}>
-                    <button type="button" className="btn btn-primary" style={{fontSize:13,padding:"8px 13px"}} onClick={()=>decideChatApproval(msg,"approve")}><CheckCircle2 size={14}/>Approve</button>
-                    <button type="button" className="btn btn-ghost" style={{fontSize:13,padding:"8px 13px"}} onClick={()=>decideChatApproval(msg,"reject")}><XCircle size={14}/>Reject</button>
-                  </div>}
-                  {msg.action.status==="pending"&&!isManager&&<span className="muted" style={{fontSize:12}}>Waiting for a Manager/Administrator to approve.</span>}
-                </div>
-              </>}
-
-              {msg.action?.kind==="generated_image"&&
-                <GeneratedImageCard fileId={msg.action.fileId} productName={msg.action.productName} onUse={sendMessage}/>}
-
-              {msg.action?.kind==="channel_drafts"&&<div style={{marginTop:10,width:"min(640px, 60vw)"}}>
-                {msg.action.masterDraft?.product_name&&<div className="card" style={{padding:12,marginBottom:10,background:"var(--bg-elev)"}}>
-                  <div className="eyebrow">Product Analysis</div>
-                  <div style={{display:"grid",gridTemplateColumns:"repeat(2,1fr)",gap:8,marginTop:6}}>
-                    <div><div className="muted" style={{fontSize:11}}>Product</div><strong>{msg.action.masterDraft.product_name}</strong></div>
-                    <div><div className="muted" style={{fontSize:11}}>Condition</div><strong>{msg.action.masterDraft.condition||"—"}</strong></div>
-                    <div><div className="muted" style={{fontSize:11}}>Brand</div><strong>{msg.action.masterDraft.brand||"—"}</strong></div>
-                    <div><div className="muted" style={{fontSize:11}}>Price</div><strong>{msg.action.masterDraft.price!=null?String(msg.action.masterDraft.price):"—"}</strong></div>
-                  </div>
-                </div>}
-                <div style={{display:"flex",gap:10,flexWrap:"wrap"}}>
-                  {msg.action.drafts.map(d=>
-                    <ChannelDraftCard key={d.id} draft={d} onAskAI={askAIOnDraft} onRegenerate={regenerateDraft}
-                      onApprove={approveDraft} busy={studioBusyDraftId===d.id}/>
-                  )}
-                </div>
-                {msg.action.sessionId&&<button className="btn btn-ghost" style={{fontSize:11,padding:"6px 9px",marginTop:10}}
-                  onClick={()=>downloadSessionAll(msg.action?.kind==="channel_drafts"?msg.action.sessionId:"")}>
-                  <Download size={12}/>Download All
-                </button>}
-              </div>}
-
-              {msg.action?.kind==="content_studio_result"&&<div style={{marginTop:10,width:"min(640px, 60vw)"}}>
-                {msg.action.masterDraft?.product_name&&<div className="card" style={{padding:12,marginBottom:10,background:"var(--bg-elev)"}}>
-                  <div className="eyebrow">Product Analysis</div>
-                  <div style={{display:"grid",gridTemplateColumns:"repeat(2,1fr)",gap:8,marginTop:6}}>
-                    <div><div className="muted" style={{fontSize:11}}>Product</div><strong>{msg.action.masterDraft.product_name}</strong></div>
-                    <div><div className="muted" style={{fontSize:11}}>Condition</div><strong>{msg.action.masterDraft.condition||"—"}</strong></div>
-                    <div><div className="muted" style={{fontSize:11}}>Brand</div><strong>{msg.action.masterDraft.brand||"—"}</strong></div>
-                    <div><div className="muted" style={{fontSize:11}}>Price</div><strong>{msg.action.masterDraft.price!=null?`$${msg.action.masterDraft.price}`:"—"}</strong></div>
-                  </div>
-                  {msg.action.masterDraft.missing_information?.length>0&&
-                    <div className="muted" style={{fontSize:11,marginTop:8}}>Missing information: {msg.action.masterDraft.missing_information.join(", ")}</div>}
-                </div>}
-                <div style={{display:"flex",gap:10,flexWrap:"wrap"}}>
-                  {msg.action.channelResults.map(r=>r.status==="success"&&r.draft
-                    ?<ChannelDraftCard key={r.draft.id} draft={r.draft} onAskAI={askAIOnDraft} onRegenerate={regenerateDraft}
-                        onApprove={approveDraft} busy={studioBusyDraftId===r.draft.id}/>
-                    :<div key={r.channel} className="card" style={{padding:12,minWidth:200,color:"var(--danger)",fontSize:12}}>
-                        <strong>{r.channel}</strong> failed: {r.error}
-                      </div>
-                  )}
-                </div>
-                <button className="btn btn-ghost" style={{fontSize:11,padding:"6px 9px",marginTop:10}}
-                  onClick={()=>downloadSessionAll(msg.action?.kind==="content_studio_result"?msg.action.sessionId:"")}>
-                  <Download size={12}/>Download All
-                </button>
-              </div>}
-            </div>
-          </div>
-        )}
-        {sending&&<div style={{display:"flex",justifyContent:"flex-start"}}>
-          <div className="muted" style={{fontSize:13,display:"flex",gap:8,alignItems:"center",padding:"12px 15px"}}><Loader2 size={14} className="spin"/>Thinking...</div>
-        </div>}
-        <div ref={bottomRef}/>
-      </div>
-
-      <div style={{padding:16,borderTop:"1px solid var(--line)"}}>
-        {activeStudio&&<div className="card" style={{padding:"8px 12px",marginBottom:10,display:"flex",alignItems:"center",justifyContent:"space-between",background:"var(--bg-elev)"}}>
-          <span style={{fontSize:12}}><Wand2 size={12} style={{marginRight:6,verticalAlign:"-2px"}}/>Recent drafts for <strong>{activeStudio.productName}</strong> — use Ask AI on a card to revise. Other questions stay in this chat.</span>
-          <button className="btn btn-ghost" style={{fontSize:11,padding:"4px 8px"}} onClick={()=>setActiveStudio(null)}>Dismiss</button>
-        </div>}
-
-        {attachedImages.length>0&&<div style={{display:"flex",gap:8,flexWrap:"wrap",marginBottom:10}}>
-          {attachedImages.map((img,i)=><div key={i} style={{position:"relative",width:56,height:56,borderRadius:8,overflow:"hidden",border:"1px solid var(--line)"}}>
-            <img src={img.previewUrl} alt={img.file.name} style={{width:"100%",height:"100%",objectFit:"cover"}}/>
-            <button type="button" onClick={()=>removeImage(i)} style={{position:"absolute",top:2,right:2,background:"rgba(0,0,0,.6)",border:"none",borderRadius:6,color:"#fff",width:18,height:18,display:"grid",placeItems:"center",cursor:"pointer"}}>
-              <X size={11}/>
-            </button>
-          </div>)}
-        </div>}
-
-        {attachedImages.length>0&&<div style={{display:"flex",gap:6,flexWrap:"wrap",marginBottom:10}}>
-          <span className="muted" style={{fontSize:11,alignSelf:"center"}}>Draft channels (optional — used only if you ask to create drafts):</span>
-          {STUDIO_CHANNELS.map(c=>
-            <button key={c.value} type="button" className={`btn ${studioChannels.includes(c.value)?"btn-primary":"btn-ghost"}`}
-              style={{fontSize:11,padding:"5px 10px"}} onClick={()=>toggleStudioChannel(c.value)}>{c.label}</button>
-          )}
-        </div>}
-
-        <div style={{display:"flex",gap:7,flexWrap:"wrap",marginBottom:10}}>
-          {QUICK_CHIPS.map(c=>
-            <button key={c.label} type="button" className="btn btn-ghost" style={{fontSize:12,padding:"7px 12px"}}
-              onClick={()=>setComposer(c.template)}>{c.label}</button>
-          )}
-        </div>
-        <form onSubmit={e=>{e.preventDefault();sendMessage();}} style={{display:"flex",gap:8,alignItems:"flex-end"}}>
-          <input ref={fileInputRef} type="file" accept="image/jpeg,image/png,image/webp" multiple hidden
-            onChange={e=>{addImages(e.target.files);e.target.value="";}}/>
-          <button
-            type="button"
-            className="icon-btn"
-            title="Attach product images"
-            onClick={()=>fileInputRef.current?.click()}
-          >
-            <ImagePlus size={16}/>
-          </button>
-          <textarea
-            className="textarea"
-            style={{minHeight:52,maxHeight:120,flex:1}}
-            placeholder={attachedImages.length>0?"Ask about this image, or request Shopify/Meta/TikTok drafts...":"Ask anything about sales, inventory, customers, payments, purchases..."}
-            value={composer}
-            onChange={e=>setComposer(e.target.value)}
-            onKeyDown={e=>{if(e.key==="Enter"&&!e.shiftKey){e.preventDefault();sendMessage();}}}
-          />
-          <button
-            type="button"
-            className="icon-btn"
-            title={voiceSupported?(listening?"Stop listening":"Voice input"):"Voice input isn't supported in this browser"}
-            disabled={!voiceSupported}
-            onClick={toggleListening}
-            style={listening?{background:"var(--danger)",color:"#fff",borderColor:"var(--danger)"}:undefined}
-          >
-            {listening?<Square size={16}/>:<Mic size={16}/>}
-          </button>
-          <button className="btn btn-primary" disabled={sending||(!composer.trim()&&attachedImages.length===0)} style={{height:44}}><Send size={15}/>Send</button>
-        </form>
-        <div className="muted" style={{fontSize:11,marginTop:8}}>
-          Powered by a real language model with controlled backend functions — it can only act through
-          registered, audited actions, and larger actions need Manager approval first. Attach photos to
-          analyse them, generate marketplace images, or create channel drafts when you ask for those.
-        </div>
+        <button className="btn btn-secondary" onClick={()=>setView("chat")}><Sparkles size={15}/>Chat</button>
+        <button className="btn btn-primary"><History size={15}/>History{pendingApprovals>0?` (${pendingApprovals} pending)`:""}</button>
       </div>
     </div>}
 
-    {!loading&&view==="history"&&<>
+    <Message error={error} success={success}/>
+
+    {loading&&<div className="card" style={{padding:30,textAlign:"center",margin:26}}><Loader2 className="spin" size={18}/> Loading...</div>}
+
+    {!loading&&view==="chat"&&<>
+      <div className="ai-thread">
+        <div className="ai-column">
+          <div className="ai-intro">
+            <div className="eyebrow">AI</div>
+            <h1>AI Command Center</h1>
+            <p>Ask about inventory, sales, customers and payments, or attach a product photo to analyse it and create channel drafts.</p>
+          </div>
+          {messages.map(msg=>
+            <div key={msg.id} className={`ai-msg ${msg.role}`}>
+              <div className="ai-bubble" style={msg.action?.kind==="error"?{color:"var(--danger)"}:undefined}>
+                <MessageAttachments attachments={msg.attachments}/>
+
+                {msg.role==="assistant"&&msg.action?.kind==="result"
+                  ?<ResultCard text={msg.text}/>
+                  :msg.action?.kind==="inventory_list"
+                    ?<>
+                      <div style={{fontSize:15,lineHeight:1.55,marginBottom:8}}>{msg.text.split("\n")[0]}</div>
+                      {msg.action.items.length>0&&<table className="ai-inventory">
+                        <thead><tr><th>Product</th><th>Location</th><th>On hand</th><th>Available</th><th>Status</th></tr></thead>
+                        <tbody>{msg.action.items.map((row,i)=><tr key={i}>
+                          <td>{row.product}</td><td>{row.location||"—"}</td>
+                          <td>{row.on_hand}</td><td>{row.available}</td><td>{row.status}</td>
+                        </tr>)}</tbody>
+                      </table>}
+                    </>
+                  :<div>{msg.text}</div>}
+
+                {msg.action?.kind==="pending_approval"&&<>
+                  {Object.keys(msg.action.args).length>0&&
+                    <div className="card" style={{padding:12,marginTop:10,background:"var(--bg-elev)"}}>
+                      <div style={{display:"grid",gap:6}}>
+                        {Object.entries(msg.action.args).map(([k,v])=>
+                          <div key={k} style={{display:"flex",justifyContent:"space-between",gap:10,fontSize:13}}>
+                            <span className="muted">{labelize(k)}</span>
+                            <strong>{typeof v==="object"?JSON.stringify(v):String(v)}</strong>
+                          </div>
+                        )}
+                      </div>
+                    </div>}
+                  <div style={{marginTop:10,display:"flex",alignItems:"center",gap:10,flexWrap:"wrap"}}>
+                    <StatusBadge value={msg.action.status}/>
+                    {msg.action.status==="pending"&&isManager&&<div style={{display:"flex",gap:8}}>
+                      <button type="button" className="btn btn-primary" style={{fontSize:13,padding:"8px 13px"}} onClick={()=>decideChatApproval(msg,"approve")}><CheckCircle2 size={14}/>Approve</button>
+                      <button type="button" className="btn btn-ghost" style={{fontSize:13,padding:"8px 13px"}} onClick={()=>decideChatApproval(msg,"reject")}><XCircle size={14}/>Reject</button>
+                    </div>}
+                    {msg.action.status==="pending"&&!isManager&&<span className="muted" style={{fontSize:12}}>Waiting for a Manager/Administrator to approve.</span>}
+                  </div>
+                </>}
+
+                {msg.action?.kind==="generated_image"&&
+                  <GeneratedImageCard fileId={msg.action.fileId} productName={msg.action.productName} onUse={sendMessage}/>}
+
+                {msg.action?.kind==="channel_drafts"&&<div style={{marginTop:10}}>
+                  {msg.action.masterDraft?.product_name&&<div style={{marginBottom:12}}>
+                    <div className="eyebrow">Product analysis</div>
+                    <strong>{msg.action.masterDraft.product_name}</strong>
+                    <div className="muted" style={{fontSize:12,marginTop:4}}>
+                      {[msg.action.masterDraft.brand,msg.action.masterDraft.condition,msg.action.masterDraft.price!=null?String(msg.action.masterDraft.price):null].filter(Boolean).join(" · ")}
+                    </div>
+                  </div>}
+                  <div style={{display:"flex",gap:10,flexWrap:"wrap"}}>
+                    {msg.action.drafts.map(d=>
+                      <ChannelDraftCard key={d.id} draft={d} onAskAI={askAIOnDraft} onRegenerate={regenerateDraft}
+                        onApprove={approveDraft} busy={studioBusyDraftId===d.id}/>
+                    )}
+                  </div>
+                  {msg.action.sessionId&&<button className="btn btn-ghost" style={{fontSize:11,padding:"6px 9px",marginTop:10}}
+                    onClick={()=>downloadSessionAll(msg.action?.kind==="channel_drafts"?msg.action.sessionId:"")}>
+                    <Download size={12}/>Download All
+                  </button>}
+                </div>}
+
+                {msg.action?.kind==="content_studio_result"&&<div style={{marginTop:10}}>
+                  {msg.action.masterDraft?.product_name&&<div style={{marginBottom:12}}>
+                    <div className="eyebrow">Product analysis</div>
+                    <strong>{msg.action.masterDraft.product_name}</strong>
+                  </div>}
+                  <div style={{display:"flex",gap:10,flexWrap:"wrap"}}>
+                    {msg.action.channelResults.map(r=>r.status==="success"&&r.draft
+                      ?<ChannelDraftCard key={r.draft.id} draft={r.draft} onAskAI={askAIOnDraft} onRegenerate={regenerateDraft}
+                          onApprove={approveDraft} busy={studioBusyDraftId===r.draft.id}/>
+                      :<div key={r.channel} style={{padding:12,minWidth:200,color:"var(--danger)",fontSize:12}}>
+                          <strong>{r.channel}</strong> failed: {r.error}
+                        </div>
+                    )}
+                  </div>
+                  <button className="btn btn-ghost" style={{fontSize:11,padding:"6px 9px",marginTop:10}}
+                    onClick={()=>downloadSessionAll(msg.action?.kind==="content_studio_result"?msg.action.sessionId:"")}>
+                    <Download size={12}/>Download All
+                  </button>
+                </div>}
+              </div>
+            </div>
+          )}
+          {sending&&<div className="ai-msg assistant"><div className="muted" style={{fontSize:13,display:"flex",gap:8,alignItems:"center"}}><Loader2 size={14} className="spin"/>Thinking...</div></div>}
+          <div ref={bottomRef}/>
+        </div>
+      </div>
+
+      <div className="ai-composer-dock">
+        <div className="ai-view-switch">
+          <button className="btn btn-ghost" style={{fontSize:12,padding:"6px 10px"}} onClick={load}><RefreshCw size={14}/>Refresh</button>
+          <button className="btn btn-primary" style={{fontSize:12,padding:"6px 10px"}}><Sparkles size={14}/>Chat</button>
+          <button className="btn btn-ghost" style={{fontSize:12,padding:"6px 10px"}} onClick={()=>setView("history")}>
+            <History size={14}/>History{pendingApprovals>0?` (${pendingApprovals})`:""}
+          </button>
+        </div>
+        <div className="ai-composer">
+          {activeStudio&&<div style={{display:"flex",alignItems:"center",justifyContent:"space-between",gap:8,marginBottom:8}}>
+            <span style={{fontSize:12}}><Wand2 size={12} style={{marginRight:6,verticalAlign:"-2px"}}/>Drafts for <strong>{activeStudio.productName}</strong></span>
+            <button className="btn btn-ghost" style={{fontSize:11,padding:"4px 8px"}} onClick={()=>setActiveStudio(null)}>Dismiss</button>
+          </div>}
+
+          {attachedImages.length>0&&<div className="ai-thumbs" style={{marginBottom:8}}>
+            {attachedImages.map((img,i)=><div key={i} style={{position:"relative",width:56,height:56}}>
+              <img src={img.previewUrl} alt={img.file.name} style={{width:56,height:56,objectFit:"cover",borderRadius:10}}/>
+              <button type="button" onClick={()=>removeImage(i)} style={{position:"absolute",top:2,right:2,background:"rgba(0,0,0,.6)",border:"none",borderRadius:6,color:"#fff",width:18,height:18,display:"grid",placeItems:"center",cursor:"pointer"}}>
+                <X size={11}/>
+              </button>
+            </div>)}
+          </div>}
+
+          {attachedImages.length>0&&<div style={{display:"flex",gap:6,flexWrap:"wrap",marginBottom:8}}>
+            <span className="muted" style={{fontSize:11,alignSelf:"center"}}>Channels</span>
+            {STUDIO_CHANNELS.map(c=>
+              <button key={c.value} type="button" className={`btn ${studioChannels.includes(c.value)?"btn-primary":"btn-ghost"}`}
+                style={{fontSize:11,padding:"5px 10px"}} onClick={()=>toggleStudioChannel(c.value)}>{c.label}</button>
+            )}
+          </div>}
+
+          {hasUserTurn&&<button type="button" className="btn btn-ghost" style={{fontSize:11,padding:"4px 8px",marginBottom:showShortcuts?8:0}}
+            onClick={()=>setShortcutsOpen(o=>!o)}><ChevronDown size={12}/>Shortcuts</button>}
+          {showShortcuts&&<div style={{display:"flex",gap:7,flexWrap:"wrap",marginBottom:8}}>
+            {QUICK_CHIPS.map(c=>
+              <button key={c.label} type="button" className="btn btn-ghost" style={{fontSize:12,padding:"6px 10px"}}
+                onClick={()=>setComposer(c.template)}>{c.label}</button>
+            )}
+          </div>}
+          <form onSubmit={e=>{e.preventDefault();sendMessage();}} className="ai-composer-row">
+            <input ref={fileInputRef} type="file" accept="image/jpeg,image/png,image/webp" multiple hidden
+              onChange={e=>{addImages(e.target.files);e.target.value="";}}/>
+            <button type="button" className="icon-btn" title="Attach product images" onClick={()=>fileInputRef.current?.click()}>
+              <ImagePlus size={16}/>
+            </button>
+            <textarea
+              className="textarea"
+              style={{flex:1}}
+              placeholder={attachedImages.length>0?"Ask about this image, or request Shopify/Meta/TikTok drafts...":"Ask anything about sales, inventory, customers, payments, purchases..."}
+              value={composer}
+              onChange={e=>setComposer(e.target.value)}
+              onKeyDown={e=>{if(e.key==="Enter"&&!e.shiftKey){e.preventDefault();sendMessage();}}}
+            />
+            <button
+              type="button"
+              className="icon-btn"
+              title={voiceSupported?(listening?"Stop listening":"Voice input"):"Voice input isn't supported in this browser"}
+              disabled={!voiceSupported}
+              onClick={toggleListening}
+              style={listening?{background:"var(--danger)",color:"#fff",borderColor:"var(--danger)"}:undefined}
+            >
+              {listening?<Square size={16}/>:<Mic size={16}/>}
+            </button>
+            <button className="btn btn-primary" disabled={sending||(!composer.trim()&&attachedImages.length===0)} style={{height:44}}><Send size={15}/>Send</button>
+          </form>
+        </div>
+      </div>
+    </>}
+
+    {!loading&&view==="history"&&<div style={{padding:"16px 26px 26px"}}>
       <div style={{display:"flex",gap:8,flexWrap:"wrap",marginBottom:16}}>
         {visibleHistoryTabs.map(x=><button key={x} className={`btn ${historyTab===x?"btn-primary":"btn-secondary"}`} onClick={()=>setHistoryTab(x)}>{x}</button>)}
       </div>
@@ -780,7 +788,7 @@ function AIPage(){
             <td><button className="btn btn-ghost" onClick={()=>reopenSession(s.id)}>Reopen</button></td>
           </tr>)}</tbody></table></div>
       </>}
-    </>}
+    </div>}
 
     {mode==="function"&&<Modal title="Create Controlled Function" eyebrow="AI Foundation" onClose={()=>setMode(null)} width={960}>
       <form onSubmit={saveFunction}><div className="form-grid">
@@ -811,7 +819,7 @@ function AIPage(){
       </div><div style={{display:"flex",justifyContent:"flex-end",marginTop:18}}><button className="btn btn-primary" disabled={saving}>Create Approval</button></div></form>
     </Modal>}
     <GlobalSpinStyle/>
-  </>;
+  </div>;
 }
 
 export default function Page() {
