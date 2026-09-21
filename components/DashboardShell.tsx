@@ -234,12 +234,32 @@ export function DashboardShell({ children }: { children: React.ReactNode }) {
   const [loggingOut, setLoggingOut] = useState(false);
   const [moduleQuery, setModuleQuery] = useState("");
 
-  const { data: user, isLoading: checking, isError: sessionInvalid } = useCurrentUser();
+  const { data: user, isPending, isError: sessionInvalid, fetchStatus } = useCurrentUser();
   const { has } = usePermissions();
+  const [sessionTimedOut, setSessionTimedOut] = useState(false);
+
+  // /auth/me used to hang indefinitely when the Next rewrite proxy waited on
+  // a dead backend (proxyTimeout is 300s). Bound the splash so a failed or
+  // stalled session check always falls through to login — never the dashboard.
+  useEffect(() => {
+    if (user) {
+      setSessionTimedOut(false);
+      return;
+    }
+    const timer = window.setTimeout(() => setSessionTimedOut(true), 10_000);
+    return () => window.clearTimeout(timer);
+  }, [user]);
+
+  const checking = Boolean(
+    !user && !sessionInvalid && !sessionTimedOut && (isPending || fetchStatus === "fetching"),
+  );
+  const unauthenticated = Boolean(
+    !user && (sessionInvalid || sessionTimedOut || (!isPending && fetchStatus !== "fetching")),
+  );
 
   useEffect(() => {
-    if (sessionInvalid) router.replace("/login");
-  }, [sessionInvalid, router]);
+    if (unauthenticated) router.replace("/login");
+  }, [unauthenticated, router]);
 
   usePrefetchModules(!!user, has);
 

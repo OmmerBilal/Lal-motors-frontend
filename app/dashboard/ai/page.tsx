@@ -2,7 +2,7 @@
 
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
-  CheckCircle2, ChevronDown, Code2, Download, History, ImagePlus, Loader2, Mic, Plus,
+  CheckCircle2, ChevronDown, ClipboardList, Code2, Download, History, ImagePlus, Loader2, Mic, Pencil, Plus,
   RefreshCw, Send, Sparkles, Square, ThumbsUp, Wand2, X, XCircle,
 } from "lucide-react";
 import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
@@ -12,7 +12,8 @@ import {
   Modal, SelectField, StatusBadge, TextAreaField, labelize,
 } from "@/components/RealUi";
 import { RequirePermission } from "@/components/RequirePermission";
-import { API_BASE_URL, CurrentUser, apiFetch, apiUpload, getCurrentUser } from "@/lib/api";
+import { ReviewListingModal } from "@/components/ReviewListingModal";
+import { API_BASE_URL, AI_CHAT_TIMEOUT_MS, CurrentUser, apiFetch, apiUpload, getCurrentUser } from "@/lib/api";
 import { invalidate } from "@/lib/invalidate";
 import { queryKeys } from "@/lib/queryKeys";
 
@@ -167,8 +168,8 @@ function ResultCard({text}:{text:string}){
   </div>;
 }
 
-function ChannelDraftCard({draft,onAskAI,onRegenerate,onApprove,busy}:{
-  draft:ChannelDraft;onAskAI:(d:ChannelDraft)=>void;onRegenerate:(d:ChannelDraft)=>void;onApprove:(d:ChannelDraft)=>void;busy:boolean;
+function ChannelDraftCard({draft,onAskAI,onRegenerate,onReview,busy}:{
+  draft:ChannelDraft;onAskAI:(d:ChannelDraft)=>void;onRegenerate:(d:ChannelDraft)=>void;onReview:(d:ChannelDraft)=>void;busy:boolean;
 }){
   const label=STUDIO_CHANNELS.find(c=>c.value===draft.channel)?.label||draft.channel;
   return <div className="card" style={{padding:14,minWidth:240,flex:"1 1 260px"}}>
@@ -184,9 +185,11 @@ function ChannelDraftCard({draft,onAskAI,onRegenerate,onApprove,busy}:{
     {(draft.payload?.caption||draft.payload?.instagram?.primary_caption)&&<p style={{fontSize:12,marginTop:8,lineHeight:1.5}}>{String(draft.payload.caption||draft.payload?.instagram?.primary_caption).slice(0,160)}</p>}
     {draft.missing_information?.length>0&&<div className="muted" style={{fontSize:11,marginTop:8}}>Missing: {draft.missing_information.join(", ")}</div>}
     <div style={{display:"flex",gap:6,flexWrap:"wrap",marginTop:12}}>
+      {(draft.channel==="shopify"||draft.channel==="ebay")&&<button className="btn btn-ghost" style={{fontSize:11,padding:"6px 9px"}} disabled={busy} onClick={()=>onReview(draft)}><ClipboardList size={12}/>Review</button>}
+      {(draft.channel==="shopify"||draft.channel==="ebay")&&<button className="btn btn-ghost" style={{fontSize:11,padding:"6px 9px"}} disabled={busy} onClick={()=>onReview(draft)}><Pencil size={12}/>Edit</button>}
       <button className="btn btn-ghost" style={{fontSize:11,padding:"6px 9px"}} disabled={busy} onClick={()=>onAskAI(draft)}><Wand2 size={12}/>Ask AI</button>
       <button className="btn btn-ghost" style={{fontSize:11,padding:"6px 9px"}} disabled={busy} onClick={()=>onRegenerate(draft)}><RefreshCw size={12}/>Regenerate</button>
-      {draft.status!=="approved"&&<button className="btn btn-ghost" style={{fontSize:11,padding:"6px 9px"}} disabled={busy} onClick={()=>onApprove(draft)}><ThumbsUp size={12}/>Approve</button>}
+      {draft.status!=="published"&&<button className="btn btn-ghost" style={{fontSize:11,padding:"6px 9px"}} disabled={busy} onClick={()=>onReview(draft)}><ThumbsUp size={12}/>Approve</button>}
       <button className="btn btn-ghost" style={{fontSize:11,padding:"6px 9px"}} onClick={()=>navigator.clipboard?.writeText(JSON.stringify(draft.payload,null,2))}>Copy</button>
       <button className="btn btn-ghost" style={{fontSize:11,padding:"6px 9px"}} onClick={()=>downloadDraft(draft.id,"json")}><Download size={12}/>JSON</button>
       {(draft.channel==="shopify"||draft.channel==="ebay")&&<button className="btn btn-ghost" style={{fontSize:11,padding:"6px 9px"}} onClick={()=>downloadDraft(draft.id,"csv")}><Download size={12}/>CSV</button>}
@@ -247,6 +250,7 @@ function AIPage(){
   const [studioChannels,setStudioChannels]=useState<ChannelName[]>([]);
   const [activeStudio,setActiveStudio]=useState<{sessionId:string;productName:string}|null>(null);
   const [studioBusyDraftId,setStudioBusyDraftId]=useState<string|null>(null);
+  const [reviewDraft,setReviewDraft]=useState<ChannelDraft|null>(null);
   const [shortcutsOpen,setShortcutsOpen]=useState(false);
 
   const contentSessionsQuery=useQuery({
@@ -381,7 +385,7 @@ function AIPage(){
         }:msg));
       }
 
-      const res=await apiFetch<ChatApiResponse>("/ai/chat",{method:"POST",body:JSON.stringify({
+      const res=await apiFetch<ChatApiResponse>("/ai/chat",{method:"POST",timeoutMs:AI_CHAT_TIMEOUT_MS,body:JSON.stringify({
         message:text,
         image_file_ids:fileIds,
         channels:studioChannels,
@@ -467,14 +471,8 @@ function AIPage(){
     }catch(e:any){setError(e?.message||"Unable to reopen session.");}
   }
 
-  async function approveDraft(draft:ChannelDraft){
-    setStudioBusyDraftId(draft.id);
-    try{
-      await apiFetch(`/ai/studio/drafts/${draft.id}/approve`,{method:"POST"});
-      setSuccess(`${draft.channel} draft approved.`);
-      invalidate(queryClient,["contentStudio"]);
-    }catch(e:any){setError(e?.message||"Unable to approve draft.");}
-    finally{setStudioBusyDraftId(null);}
+  function openReview(draft:ChannelDraft){
+    setReviewDraft(draft);
   }
 
   async function decideChatApproval(msg:ChatMessage,decision:"approve"|"reject"){
@@ -625,7 +623,7 @@ function AIPage(){
                   <div style={{display:"flex",gap:10,flexWrap:"wrap"}}>
                     {msg.action.drafts.map(d=>
                       <ChannelDraftCard key={d.id} draft={d} onAskAI={askAIOnDraft} onRegenerate={regenerateDraft}
-                        onApprove={approveDraft} busy={studioBusyDraftId===d.id}/>
+                        onReview={openReview} busy={studioBusyDraftId===d.id}/>
                     )}
                   </div>
                   {msg.action.sessionId&&<button className="btn btn-ghost" style={{fontSize:11,padding:"6px 9px",marginTop:10}}
@@ -642,7 +640,7 @@ function AIPage(){
                   <div style={{display:"flex",gap:10,flexWrap:"wrap"}}>
                     {msg.action.channelResults.map(r=>r.status==="success"&&r.draft
                       ?<ChannelDraftCard key={r.draft.id} draft={r.draft} onAskAI={askAIOnDraft} onRegenerate={regenerateDraft}
-                          onApprove={approveDraft} busy={studioBusyDraftId===r.draft.id}/>
+                          onReview={openReview} busy={studioBusyDraftId===r.draft.id}/>
                       :<div key={r.channel} style={{padding:12,minWidth:200,color:"var(--danger)",fontSize:12}}>
                           <strong>{r.channel}</strong> failed: {r.error}
                         </div>
@@ -818,6 +816,7 @@ function AIPage(){
         <TextAreaField label="Payload JSON" value={approvalForm.payload} onChange={v=>setApprovalForm({...approvalForm,payload:v})}/>
       </div><div style={{display:"flex",justifyContent:"flex-end",marginTop:18}}><button className="btn btn-primary" disabled={saving}>Create Approval</button></div></form>
     </Modal>}
+    {reviewDraft&&<ReviewListingModal draft={reviewDraft} onClose={()=>setReviewDraft(null)} onDone={msg=>setSuccess(msg)}/>}
     <GlobalSpinStyle/>
   </div>;
 }

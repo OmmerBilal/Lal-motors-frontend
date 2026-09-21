@@ -4,7 +4,8 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Download, RefreshCw, Search, ThumbsUp, Wand2 } from "lucide-react";
 import { useMemo, useState } from "react";
 
-import { EmptyRow, LoadingRow, Message, Modal, SelectField, StatusBadge, labelize } from "@/components/RealUi";
+import { ReviewListingModal } from "@/components/ReviewListingModal";
+import { EmptyRow, LoadingRow, Message, Modal, StatusBadge, labelize } from "@/components/RealUi";
 import { API_BASE_URL, apiFetch } from "@/lib/api";
 import { invalidate } from "@/lib/invalidate";
 import { queryKeys } from "@/lib/queryKeys";
@@ -33,11 +34,12 @@ function downloadDraft(id: string, format: "json" | "csv" | "txt") {
 // Shared "AI Content Drafts" library, embedded in each channel module
 // (Shopify/eBay's own tabbed modules, and Meta/TikTok's ChannelListingsPage).
 // One component change here lights up every channel's draft library at once.
-export function AIDraftsSection({ provider, title }: { provider: ChannelName; title: string }) {
+export function AIDraftsSection({ provider, title, isConnected = false }: { provider: ChannelName; title: string; isConnected?: boolean }) {
   const queryClient = useQueryClient();
   const [search, setSearch] = useState("");
   const [statusFilter, setStatusFilter] = useState("");
   const [selected, setSelected] = useState<ChannelDraft | null>(null);
+  const [reviewDraft, setReviewDraft] = useState<ChannelDraft | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [success, setSuccess] = useState("");
@@ -77,14 +79,9 @@ export function AIDraftsSection({ provider, title }: { provider: ChannelName; ti
     finally { setBusy(false); }
   }
 
-  async function approve(draft: ChannelDraft) {
-    setBusy(true); setError("");
-    try {
-      const updated = await apiFetch<ChannelDraft>(`/ai/studio/drafts/${draft.id}/approve`, { method: "POST" });
-      setSelected(updated); setSuccess("Draft approved.");
-      invalidate(queryClient, ["contentStudio"]);
-    } catch (e: any) { setError(e?.message || "Unable to approve draft."); }
-    finally { setBusy(false); }
+  function openReview(draft: ChannelDraft) {
+    setSelected(null);
+    setReviewDraft(draft);
   }
 
   async function saveEdit(draft: ChannelDraft, patch: Record<string, any>) {
@@ -126,6 +123,7 @@ export function AIDraftsSection({ provider, title }: { provider: ChannelName; ti
           <td>{new Date(d.updated_at).toLocaleString()}</td>
           <td><div className="record-actions">
             <button className="record-action view" onClick={() => setSelected(d)}>View</button>
+            {(provider === "shopify" || provider === "ebay" || provider === "meta") && <button className="record-action view" onClick={() => openReview(d)}>Review</button>}
           </div></td>
         </tr>)}</tbody></table></div>
 
@@ -149,18 +147,26 @@ export function AIDraftsSection({ provider, title }: { provider: ChannelName; ti
         }}>Edit</button>
         <button className="btn btn-secondary" disabled={busy} onClick={() => askAI(selected)}><Wand2 size={14} />Ask AI</button>
         <button className="btn btn-secondary" disabled={busy} onClick={() => regenerate(selected)}><RefreshCw size={14} />Regenerate</button>
-        {selected.status !== "approved" && <button className="btn btn-primary" disabled={busy} onClick={() => approve(selected)}><ThumbsUp size={14} />Approve</button>}
+        <button className="btn btn-secondary" disabled={busy} onClick={() => openReview(selected)}>Review</button>
+        {selected.status !== "published" && <button className="btn btn-primary" disabled={busy} onClick={() => openReview(selected)}><ThumbsUp size={14} />Approve</button>}
         <button className="btn btn-ghost" onClick={() => navigator.clipboard?.writeText(JSON.stringify(selected.payload, null, 2))}>Copy</button>
         <button className="btn btn-ghost" onClick={() => downloadDraft(selected.id, "json")}><Download size={14} />JSON</button>
         {(provider === "shopify" || provider === "ebay") && <button className="btn btn-ghost" onClick={() => downloadDraft(selected.id, "csv")}><Download size={14} />CSV</button>}
         {(provider === "meta" || provider === "tiktok") && <button className="btn btn-ghost" onClick={() => downloadDraft(selected.id, "txt")}><Download size={14} />TXT</button>}
       </div>
       <div className="card" style={{ padding: 10, marginTop: 14, fontSize: 12 }}>
-        {provider === "shopify" && "Publish is disabled until Shopify is connected — connect it in the Sync/Connection tab."}
-        {provider === "ebay" && "Publish is disabled until eBay is connected — connect it in the Sync/Connection tab."}
-        {provider === "meta" && "Connect Meta to publish."}
+        {provider === "shopify" && (isConnected
+          ? "Approve opens Review & Complete Listing. Publishing uses this saved draft only — it does not call OpenAI again. The first publish creates an unpublished Shopify product on the selected store."
+          : "Review still works offline. Connect Shopify in the Sync tab before creating a store listing.")}
+        {provider === "ebay" && (isConnected
+          ? "Approve opens Review & Complete Listing. Publishing uses this saved draft only — it does not call OpenAI again."
+          : "Review still works offline. Connect eBay in the Sync tab before creating an account listing.")}
+        {provider === "meta" && (isConnected
+          ? "Approve opens Review & Complete Listing. Publishing uses this saved draft only — it does not call OpenAI again. You choose Facebook, Instagram, or both for the selected Page."
+          : "Review still works offline. Connect Meta before publishing to a Facebook Page or Instagram account.")}
         {provider === "tiktok" && "Connect TikTok to publish."}
       </div>
     </Modal>}
+    {reviewDraft && <ReviewListingModal draft={reviewDraft} onClose={() => setReviewDraft(null)} onDone={(msg) => { setSuccess(msg); draftsQuery.refetch(); }} />}
   </section>;
 }

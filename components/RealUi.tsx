@@ -72,9 +72,12 @@ export function EmptyRow({ columns, text = "No records found." }: { columns: num
 
 const STATUS_TONE: Record<string, "green" | "orange" | "red" | "blue"> = {
   active: "green", posted: "green", paid: "green", full: "green", fulfilled: "green",
-  delivered: "green", completed: "green", in_stock: "green",
+  delivered: "green", completed: "green", in_stock: "green",   connected: "green",
+  approved: "green", published: "green",
   pending: "orange", partial: "orange", partially_fulfilled: "orange", partially_paid: "orange",
   unpaid: "orange", on_hold: "orange", to_photograph: "orange", fully_reserved: "orange",
+  not_connected: "orange", connected_pending_test: "orange", token_expired: "orange",
+  permission_required: "orange", attention_required: "orange", "attention required": "orange",
   draft: "blue", confirmed: "blue", processing: "blue", submitted: "blue", in_production: "blue",
   reserved: "blue", incoming: "blue", listed: "blue", ready_to_list: "blue",
   cancelled: "red", void: "red", failed: "red", returned: "red", refunded: "red",

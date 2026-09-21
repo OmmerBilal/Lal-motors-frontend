@@ -19,25 +19,60 @@ export class ApiError extends Error {
   }
 }
 
+export type ApiFetchOptions = RequestInit & { timeoutMs?: number };
+
+const DEFAULT_TIMEOUT_MS = 20_000;
+export const AUTH_ME_TIMEOUT_MS = 8_000;
+// AI chat/tool loops can exceed the 20s session-hang default. Match the
+// dedicated Next.js /api/v1/ai proxy (300s) so the browser does not abort
+// a still-running backend OpenAI + Shopify tool call.
+export const AI_CHAT_TIMEOUT_MS = 300_000;
+
 export async function apiFetch<T>(
   path: string,
-  options: RequestInit = {},
+  options: ApiFetchOptions = {},
 ): Promise<T> {
-  const headers = new Headers(options.headers);
+  const { timeoutMs = DEFAULT_TIMEOUT_MS, signal: userSignal, ...init } = options;
+  const headers = new Headers(init.headers);
 
   // A FormData body must keep the browser-generated multipart boundary in
   // its Content-Type — forcing application/json here would silently break
   // every file upload (the server would receive a mislabeled empty body).
-  if (options.body && !headers.has("Content-Type") && !(options.body instanceof FormData)) {
+  if (init.body && !headers.has("Content-Type") && !(init.body instanceof FormData)) {
     headers.set("Content-Type", "application/json");
   }
 
-  const response = await fetch(`${API_BASE_URL}${path}`, {
-    ...options,
-    headers,
-    credentials: "include",
-    cache: "no-store",
-  });
+  const controller = new AbortController();
+  const abortFromUser = () => controller.abort();
+  if (userSignal) {
+    if (userSignal.aborted) {
+      controller.abort();
+    } else {
+      userSignal.addEventListener("abort", abortFromUser, { once: true });
+    }
+  }
+  const timeoutId = window.setTimeout(() => controller.abort(), timeoutMs);
+
+  let response: Response;
+  try {
+    response = await fetch(`${API_BASE_URL}${path}`, {
+      ...init,
+      headers,
+      credentials: "include",
+      cache: "no-store",
+      signal: controller.signal,
+    });
+  } catch (err) {
+    const aborted = (err instanceof DOMException && err.name === "AbortError")
+      || (err instanceof Error && err.name === "AbortError");
+    if (aborted) {
+      throw new ApiError("Request timed out.", 408);
+    }
+    throw err;
+  } finally {
+    window.clearTimeout(timeoutId);
+    userSignal?.removeEventListener("abort", abortFromUser);
+  }
 
   let data: any = null;
   const contentType = response.headers.get("content-type") || "";
@@ -59,6 +94,11 @@ export async function apiFetch<T>(
         message = data.detail
           .map((item: any) => item?.msg || "Invalid value")
           .join(", ");
+      } else if (data.detail && typeof data.detail === "object") {
+        message = data.detail.message || data.detail.detail || message;
+        if (Array.isArray(data.detail.missing) && data.detail.missing.length) {
+          message = `${message} Missing: ${data.detail.missing.join(", ")}`;
+        }
       }
     }
 
@@ -92,7 +132,7 @@ export type CurrentUser = {
 };
 
 export async function getCurrentUser(): Promise<CurrentUser> {
-  return apiFetch<CurrentUser>("/auth/me");
+  return apiFetch<CurrentUser>("/auth/me", { timeoutMs: AUTH_ME_TIMEOUT_MS });
 }
 
 export async function logout(): Promise<void> {

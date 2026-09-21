@@ -17,5 +17,10 @@ export function useCurrentUser() {
     staleTime: 30 * 1000,
     gcTime: 30 * 60 * 1000,
     retry: false,
+    // Default "online" mode can leave the auth query pending forever when
+    // the browser reports offline, which froze the dashboard on
+    // "Checking session...". Always attempt /auth/me; the fetch timeout
+    // and DashboardShell wall-clock bound still apply.
+    networkMode: "always",
   });
 }

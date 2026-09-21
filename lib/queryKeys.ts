@@ -83,21 +83,29 @@ export const queryKeys = {
 
   shopify: {
     connection: () => ["shopify", "connection"] as const,
-    overview: () => ["shopify", "overview"] as const,
+    stores: () => ["shopify", "stores"] as const,
+    overview: (params?: Record<string, unknown>) => ["shopify", "overview", params ?? {}] as const,
     products: (params?: Record<string, unknown>) => ["shopify", "products", params ?? {}] as const,
     orders: (params?: Record<string, unknown>) => ["shopify", "orders", params ?? {}] as const,
     inventory: (params?: Record<string, unknown>) => ["shopify", "inventory", params ?? {}] as const,
     customers: (params?: Record<string, unknown>) => ["shopify", "customers", params ?? {}] as const,
-    syncRuns: () => ["shopify", "syncRuns"] as const,
+    syncRuns: (params?: Record<string, unknown>) => ["shopify", "syncRuns", params ?? {}] as const,
   },
 
   ebay: {
     connection: () => ["ebay", "connection"] as const,
-    overview: () => ["ebay", "overview"] as const,
+    overview: (params?: Record<string, unknown>) => ["ebay", "overview", params ?? {}] as const,
     listings: (params?: Record<string, unknown>) => ["ebay", "listings", params ?? {}] as const,
     orders: (params?: Record<string, unknown>) => ["ebay", "orders", params ?? {}] as const,
     inventory: (params?: Record<string, unknown>) => ["ebay", "inventory", params ?? {}] as const,
-    syncRuns: () => ["ebay", "syncRuns"] as const,
+    syncRuns: (params?: Record<string, unknown>) => ["ebay", "syncRuns", params ?? {}] as const,
+  },
+
+  meta: {
+    connection: () => ["meta", "connection"] as const,
+    destinations: () => ["meta", "destinations"] as const,
+    overview: (params?: Record<string, unknown>) => ["meta", "overview", params ?? {}] as const,
+    history: (params?: Record<string, unknown>) => ["meta", "history", params ?? {}] as const,
   },
 };
 
@@ -118,4 +126,5 @@ export const invalidationGroups = {
   contentStudio: ["contentStudio"] as const,
   shopify: ["shopify"] as const,
   ebay: ["ebay"] as const,
+  meta: ["meta"] as const,
 };

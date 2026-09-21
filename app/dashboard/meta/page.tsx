@@ -1,14 +1,17 @@
-import { ChannelListingsPage } from "@/components/ChannelListingsPage";
+import { MetaBusinessModule } from "@/components/MetaBusinessModule";
 import { RequirePermission } from "@/components/RequirePermission";
+import { Suspense } from "react";
 
 function PageContent() {
-  return <ChannelListingsPage provider="meta" title="Meta" description="Live database records for Facebook / Instagram integration accounts and channel content/listings." />;
+  return <MetaBusinessModule />;
 }
 
 export default function Page() {
   return (
     <RequirePermission perm="meta.drafts.view">
-      <PageContent />
+      <Suspense fallback={null}>
+        <PageContent />
+      </Suspense>
     </RequirePermission>
   );
 }
