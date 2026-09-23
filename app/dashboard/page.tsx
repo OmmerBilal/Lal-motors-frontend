@@ -24,7 +24,7 @@ import {
   WalletCards,
 } from "lucide-react";
 import { useQuery, useQueryClient, type QueryClient } from "@tanstack/react-query";
-import { useMemo } from "react";
+import { useEffect, useMemo, useState } from "react";
 
 import { MetricCard } from "@/components/Shared";
 import { money } from "@/components/RealUi";
@@ -81,13 +81,6 @@ type DashboardOverview = {
   payables: number | null; lowStock: number | null; pendingPayments: number | null;
 };
 
-type DashboardSummary = {
-  counts: Record<CountKey, number | null>;
-  overview: DashboardOverview;
-  activity: ActivityItem[];
-  errors: number;
-};
-
 // Every count/overview widget maps to exactly one backend permission key —
 // this is what "dashboard must be permission-aware" (Phase 11, marked
 // CRITICAL) actually means: an employee without a key never even triggers
@@ -119,7 +112,16 @@ const emptyOverview: DashboardOverview = {
   todaySales: null, inventoryValue: null, receivables: null, payables: null, lowStock: null, pendingPayments: null,
 };
 
-async function fetchDashboardSummary(queryClient: QueryClient, permissions: Set<string>): Promise<DashboardSummary> {
+// Split into two independent queries (below) instead of one combined
+// Promise.all of ~23 requests: that single burst was the real contributor
+// to the ~30s login->usable delay, not any one slow call — measured
+// directly, each request only costs ~0.2-4.5s, but a real browser caps
+// concurrent requests per origin at ~6 on HTTP/1.1 (what `next dev` serves
+// locally), so ~23+ simultaneous requests queue in waves behind that cap.
+// Splitting lets the Business Overview cards (what a user looks at first)
+// render as soon as THEIR ~8 requests resolve, instead of waiting on the 14
+// separate count badges below them too.
+async function fetchDashboardCounts(permissions: Set<string>): Promise<{ counts: Record<CountKey, number | null>; errors: number }> {
   const counts: Record<CountKey, number | null> = { ...emptyCounts };
   let errors = 0;
 
@@ -145,6 +147,11 @@ async function fetchDashboardSummary(queryClient: QueryClient, permissions: Set<
       .catch(() => { counts.approvals = 0; errors += 1; });
   }
 
+  return { counts, errors };
+}
+
+async function fetchDashboardOverview(queryClient: QueryClient, permissions: Set<string>): Promise<{ overview: DashboardOverview; activity: ActivityItem[]; errors: number }> {
+  let errors = 0;
   const canSales = permissions.has("sales.view");
   const canPayments = permissions.has("payments.view");
   const canPurchaseOrders = permissions.has("purchase_orders.view");
@@ -190,7 +197,13 @@ async function fetchDashboardSummary(queryClient: QueryClient, permissions: Set<
             staleTime: 2 * 60 * 1000,
           })
         : Promise.resolve(null),
-      canInventory ? apiFetch<ValuationRow[]>("/inventory/valuation") : Promise.resolve(null),
+      canInventory
+        ? queryClient.fetchQuery({
+            queryKey: queryKeys.inventory.valuation(),
+            queryFn: () => apiFetch<ValuationRow[]>("/inventory/valuation"),
+            staleTime: 2 * 60 * 1000,
+          })
+        : Promise.resolve(null),
       canCustomers ? apiFetch<CustomerListResp>("/customers?limit=300") : Promise.resolve(null),
       canSuppliers ? apiFetch<SupplierListResp>("/suppliers?limit=300") : Promise.resolve(null),
       canInventory
@@ -255,7 +268,7 @@ async function fetchDashboardSummary(queryClient: QueryClient, permissions: Set<
     errors += 1;
   }
 
-  return { counts, overview, activity, errors };
+  return { overview, activity, errors };
 }
 
 export default function DashboardPage() {
@@ -264,21 +277,41 @@ export default function DashboardPage() {
   const permissionSet = useMemo(() => new Set(permissions), [permissions]);
   const sortedPermissions = useMemo(() => [...permissions].sort(), [permissions]);
 
-  const { data } = useQuery({
-    // Permissions are part of the key: if an Admin changes what this
-    // employee can see, this is a genuinely different query, not a stale
-    // reuse of a summary computed under the old permission set.
-    queryKey: [...queryKeys.dashboard.summary(), sortedPermissions],
-    queryFn: () => fetchDashboardSummary(queryClient, permissionSet),
+  // Permissions are part of both keys: if an Admin changes what this
+  // employee can see, these are genuinely different queries, not a stale
+  // reuse of a summary computed under the old permission set.
+  const overviewQuery = useQuery({
+    queryKey: [...queryKeys.dashboard.summary(), "overview", sortedPermissions],
+    queryFn: () => fetchDashboardOverview(queryClient, permissionSet),
     enabled: !permissionsLoading,
     staleTime: 45 * 1000,
     gcTime: 10 * 60 * 1000,
   });
 
-  const counts = data?.counts ?? emptyCounts;
-  const overview = data?.overview ?? emptyOverview;
-  const activity = data?.activity ?? [];
-  const errors = data?.errors ?? 0;
+  // Counts are individually cheap (?limit=1 each) but there are 14+ of
+  // them — a short fixed delay (not gated on the overview query finishing,
+  // just started slightly later) gives the overview requests above first
+  // claim on the browser's connection pool instead of ~22 requests hitting
+  // it in the same instant.
+  const [countsEnabled, setCountsEnabled] = useState(false);
+  useEffect(() => {
+    if (permissionsLoading) return;
+    const timer = window.setTimeout(() => setCountsEnabled(true), 150);
+    return () => window.clearTimeout(timer);
+  }, [permissionsLoading]);
+
+  const countsQuery = useQuery({
+    queryKey: [...queryKeys.dashboard.summary(), "counts", sortedPermissions],
+    queryFn: () => fetchDashboardCounts(permissionSet),
+    enabled: countsEnabled,
+    staleTime: 45 * 1000,
+    gcTime: 10 * 60 * 1000,
+  });
+
+  const counts = countsQuery.data?.counts ?? emptyCounts;
+  const overview = overviewQuery.data?.overview ?? emptyOverview;
+  const activity = overviewQuery.data?.activity ?? [];
+  const errors = (overviewQuery.data?.errors ?? 0) + (countsQuery.data?.errors ?? 0);
 
   const display = (value: number | null) => value === null ? "—" : String(value);
   const displayMoney = (value: number | null) => value === null ? "—" : money(value);

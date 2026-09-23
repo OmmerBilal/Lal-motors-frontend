@@ -24,7 +24,11 @@ export function makeQueryClient() {
     defaultOptions: {
       queries: {
         staleTime: 60 * 1000,
-        gcTime: 10 * 60 * 1000,
+        // Long enough that a module visited once early in a shift is still
+        // warm 15-20 minutes later (staleTime, unchanged, still governs
+        // whether a background refetch happens on next use — this only
+        // controls how long unused cache entries survive before eviction).
+        gcTime: 45 * 60 * 1000,
         refetchOnWindowFocus: false,
         refetchOnReconnect: true,
         retry: 1,

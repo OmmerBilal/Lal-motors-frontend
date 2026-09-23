@@ -4,13 +4,17 @@ import {
   Archive,
   CarFront,
   Eye,
+  FileText,
   Loader2,
+  PackageCheck,
   Pencil,
   Plus,
   RefreshCw,
   Search,
+  Wrench,
   X,
 } from "lucide-react";
+import Link from "next/link";
 import { keepPreviousData, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   FormEvent,
@@ -19,8 +23,11 @@ import {
   useState,
 } from "react";
 
+import { Message, Modal, SelectField } from "@/components/RealUi";
 import { RequirePermission } from "@/components/RequirePermission";
-import { ApiError, apiFetch } from "@/lib/api";
+import { VehicleWorkEntryForm } from "@/components/VehicleWorkEntryForm";
+import { API_BASE_URL, ApiError, apiFetch } from "@/lib/api";
+import { usePermissions } from "@/lib/hooks/usePermissions";
 import { invalidate } from "@/lib/invalidate";
 import { queryKeys } from "@/lib/queryKeys";
 
@@ -41,14 +48,17 @@ type Vehicle = {
   vin: string | null;
   stock_number: string | null;
   lot_number: string | null;
+  registration: string | null;
   year: number | null;
   make_id: string | null;
   make_name: string | null;
   model_id: string | null;
   model_name: string | null;
   trim: string | null;
+  color: string | null;
   engine: string | null;
   transmission: string | null;
+  fuel_type: string | null;
   mileage: number | null;
   purchase_price: string | number | null;
   purchase_date: string | null;
@@ -99,12 +109,15 @@ type VehicleForm = {
   vin: string;
   stock_number: string;
   lot_number: string;
+  registration: string;
   year: string;
   make_name: string;
   model_name: string;
   trim: string;
+  color: string;
   engine: string;
   transmission: string;
+  fuel_type: string;
   mileage: string;
   purchase_price: string;
   purchase_date: string;
@@ -123,12 +136,15 @@ const emptyForm: VehicleForm = {
   vin: "",
   stock_number: "",
   lot_number: "",
+  registration: "",
   year: "",
   make_name: "",
   model_name: "",
   trim: "",
+  color: "",
   engine: "",
   transmission: "",
+  fuel_type: "",
   mileage: "",
   purchase_price: "",
   purchase_date: "",
@@ -184,12 +200,15 @@ function vehicleToForm(vehicle: Vehicle): VehicleForm {
     vin: vehicle.vin || "",
     stock_number: vehicle.stock_number || "",
     lot_number: vehicle.lot_number || "",
+    registration: vehicle.registration || "",
     year: vehicle.year ? String(vehicle.year) : "",
     make_name: vehicle.make_name || "",
     model_name: vehicle.model_name || "",
     trim: vehicle.trim || "",
+    color: vehicle.color || "",
     engine: vehicle.engine || "",
     transmission: vehicle.transmission || "",
+    fuel_type: vehicle.fuel_type || "",
     mileage:
       vehicle.mileage !== null ? String(vehicle.mileage) : "",
     purchase_price:
@@ -215,12 +234,43 @@ function vehicleToForm(vehicle: Vehicle): VehicleForm {
   };
 }
 
+type VehicleTab = "active" | "incoming";
+
+type IncomingVehicle = {
+  id: string;
+  item_code: string;
+  name: string;
+  vin: string | null;
+  stock_number: string | null;
+  year: number | null;
+  make_name: string | null;
+  model_name: string | null;
+  purchase_date: string | null;
+  purchase_price: string | number | null;
+  auction_source: string | null;
+  acquisition_status: string;
+  source_document_file_id: string | null;
+};
+
+type IncomingVehicleListResponse = {
+  total: number;
+  items: IncomingVehicle[];
+};
+
 function VehiclesPage() {
   const queryClient = useQueryClient();
+  const { has } = usePermissions();
   const [search, setSearch] = useState("");
   const [debouncedSearch, setDebouncedSearch] = useState("");
   const [statusFilter, setStatusFilter] = useState("");
   const [includeArchived, setIncludeArchived] = useState(false);
+  const [vehicleTab, setVehicleTab] = useState<VehicleTab>("active");
+  const [receiveTarget, setReceiveTarget] = useState<IncomingVehicle | null>(null);
+  const [receiveDate, setReceiveDate] = useState("");
+  const [receiveLocationId, setReceiveLocationId] = useState("");
+  const [receiveError, setReceiveError] = useState("");
+  const [receiving, setReceiving] = useState(false);
+  const [showWorkEntryModal, setShowWorkEntryModal] = useState(false);
 
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
@@ -294,6 +344,63 @@ function VehiclesPage() {
   });
   const models = matchedMake ? modelsQuery.data ?? [] : [];
 
+  const incomingParams = useMemo(
+    () => ({ search: debouncedSearch.trim() || undefined }),
+    [debouncedSearch],
+  );
+
+  const incomingQuery = useQuery({
+    queryKey: queryKeys.vehicles.incoming(incomingParams),
+    queryFn: () => {
+      const params = new URLSearchParams();
+      if (incomingParams.search) params.set("search", incomingParams.search);
+      params.set("limit", "200");
+      return apiFetch<IncomingVehicleListResponse>(`/vehicles/incoming?${params.toString()}`);
+    },
+    enabled: vehicleTab === "incoming",
+    staleTime: 60 * 1000,
+    placeholderData: keepPreviousData,
+  });
+  const incomingVehicles = incomingQuery.data?.items ?? [];
+
+  function documentUrl(vehicleId: string, fileId: string) {
+    return `${API_BASE_URL}/vehicles/${vehicleId}/documents/${fileId}`;
+  }
+
+  function openReceive(vehicle: IncomingVehicle) {
+    setReceiveTarget(vehicle);
+    setReceiveDate(new Date().toISOString().slice(0, 10));
+    setReceiveLocationId(locations[0]?.id || "");
+    setReceiveError("");
+  }
+
+  async function submitReceive(e: FormEvent) {
+    e.preventDefault();
+    if (!receiveTarget || !receiveLocationId) {
+      setReceiveError("Choose a storage location.");
+      return;
+    }
+
+    setReceiving(true);
+    setReceiveError("");
+
+    try {
+      await apiFetch(`/vehicles/${receiveTarget.id}/mark-received`, {
+        method: "POST",
+        body: JSON.stringify({
+          received_date: receiveDate || null,
+          storage_location_id: receiveLocationId,
+        }),
+      });
+      await invalidate(queryClient, ["vehicles", "inventory", "dashboard"]);
+      setReceiveTarget(null);
+    } catch (err) {
+      setReceiveError(err instanceof Error ? err.message : "Unable to mark this vehicle as received.");
+    } finally {
+      setReceiving(false);
+    }
+  }
+
   function openCreate() {
     setSelected(null);
     setForm(emptyForm);
@@ -346,12 +453,15 @@ function VehiclesPage() {
       vin: form.vin || null,
       stock_number: form.stock_number || null,
       lot_number: form.lot_number || null,
+      registration: form.registration || null,
       year: optionalNumber(form.year),
       make_name: form.make_name || null,
       model_name: form.model_name || null,
       trim: form.trim || null,
+      color: form.color || null,
       engine: form.engine || null,
       transmission: form.transmission || null,
+      fuel_type: form.fuel_type || null,
       mileage: optionalNumber(form.mileage),
       purchase_price: optionalNumber(form.purchase_price),
       purchase_date: form.purchase_date || null,
@@ -452,10 +562,16 @@ function VehiclesPage() {
             flexWrap: "wrap",
           }}
         >
+          {has("vehicles.work.add") && (
+            <button className="btn btn-secondary" onClick={() => setShowWorkEntryModal(true)}>
+              <Wrench size={15} /> Vehicle Work
+            </button>
+          )}
+
           <button
             className="btn btn-secondary"
-            onClick={() => loadVehicles()}
-            disabled={loading}
+            onClick={() => (vehicleTab === "active" ? loadVehicles() : incomingQuery.refetch())}
+            disabled={vehicleTab === "active" ? loading : incomingQuery.isLoading}
           >
             <RefreshCw size={15} /> Refresh
           </button>
@@ -466,6 +582,26 @@ function VehiclesPage() {
         </div>
       </div>
 
+      {has("vehicles.acquisition.view") && (
+        <div style={{ display: "flex", gap: 6, marginBottom: 16 }}>
+          <button
+            type="button"
+            className={`btn ${vehicleTab === "active" ? "btn-primary" : "btn-secondary"}`}
+            onClick={() => setVehicleTab("active")}
+          >
+            Active Vehicles
+          </button>
+          <button
+            type="button"
+            className={`btn ${vehicleTab === "incoming" ? "btn-primary" : "btn-secondary"}`}
+            onClick={() => setVehicleTab("incoming")}
+          >
+            Incoming / In Transit
+          </button>
+        </div>
+      )}
+
+      {vehicleTab === "active" && (
       <div className="metric-grid">
         <div className="metric-card">
           <div className="metric-top">
@@ -522,6 +658,7 @@ function VehiclesPage() {
           </div>
         </div>
       </div>
+      )}
 
       {displayError && (
         <div
@@ -553,6 +690,7 @@ function VehiclesPage() {
         </div>
       )}
 
+      {vehicleTab === "active" && (
       <section className="records-section">
         <div className="records-toolbar card">
           <div>
@@ -677,9 +815,12 @@ function VehiclesPage() {
                 vehicles.map((vehicle) => (
                   <tr key={vehicle.id}>
                     <td>
-                      <div style={{ fontWeight: 800 }}>
+                      <Link
+                        href={`/dashboard/vehicles/${vehicle.id}`}
+                        style={{ fontWeight: 800, color: "var(--text)" }}
+                      >
                         {vehicle.name}
-                      </div>
+                      </Link>
                       <div
                         className="muted"
                         style={{ fontSize: 11, marginTop: 3 }}
@@ -762,6 +903,116 @@ function VehiclesPage() {
           </table>
         </div>
       </section>
+      )}
+
+      {vehicleTab === "incoming" && (
+        <section className="records-section">
+          <div className="records-toolbar card">
+            <div>
+              <div style={{ fontWeight: 850 }}>Incoming / In Transit</div>
+              <div className="muted" style={{ fontSize: 12, marginTop: 3 }}>
+                Purchased but not yet physically received — not available as sellable stock.
+              </div>
+            </div>
+            <div className="records-search">
+              <Search size={15} />
+              <input
+                value={search}
+                onChange={(e) => setSearch(e.target.value)}
+                placeholder="Stock number, VIN, auction source..."
+              />
+            </div>
+          </div>
+
+          <div className="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>Vehicle</th>
+                  <th>VIN</th>
+                  <th>Stock #</th>
+                  <th>Purchase Date</th>
+                  <th>Purchase Price</th>
+                  <th>Auction / Source</th>
+                  <th style={{ width: 190 }}>Actions</th>
+                </tr>
+              </thead>
+              <tbody>
+                {incomingQuery.isLoading ? (
+                  <tr>
+                    <td colSpan={7} style={{ padding: 34, textAlign: "center" }}>
+                      <span className="muted" style={{ display: "inline-flex", gap: 8, alignItems: "center" }}>
+                        <Loader2 size={17} className="spin" /> Loading...
+                      </span>
+                    </td>
+                  </tr>
+                ) : incomingVehicles.length === 0 ? (
+                  <tr>
+                    <td colSpan={7} style={{ padding: 34, textAlign: "center" }} className="muted">
+                      No incoming vehicles. Scan an auction slip from the AI Command Center to add one.
+                    </td>
+                  </tr>
+                ) : (
+                  incomingVehicles.map((vehicle) => (
+                    <tr key={vehicle.id}>
+                      <td>
+                        <Link href={`/dashboard/vehicles/${vehicle.id}`} style={{ fontWeight: 800, color: "var(--text)" }}>
+                          {vehicle.name}
+                        </Link>
+                        <div className="muted" style={{ fontSize: 11, marginTop: 3 }}>
+                          {vehicle.year || ""} {vehicle.make_name || ""} {vehicle.model_name || ""}
+                        </div>
+                      </td>
+                      <td>{vehicle.vin || "—"}</td>
+                      <td>{vehicle.stock_number || "—"}</td>
+                      <td>{vehicle.purchase_date || "—"}</td>
+                      <td>
+                        {vehicle.purchase_price !== null
+                          ? `$${Number(vehicle.purchase_price).toLocaleString()}`
+                          : "—"}
+                      </td>
+                      <td>{vehicle.auction_source || "—"}</td>
+                      <td>
+                        <div className="record-actions">
+                          <Link
+                            href={`/dashboard/vehicles/${vehicle.id}`}
+                            className="record-action view"
+                            title="View Vehicle"
+                          >
+                            <Eye size={14} />
+                          </Link>
+
+                          {vehicle.source_document_file_id && (
+                            <a
+                              className="record-action view"
+                              title="View Auction Slip"
+                              href={documentUrl(vehicle.id, vehicle.source_document_file_id)}
+                              target="_blank"
+                              rel="noreferrer"
+                            >
+                              <FileText size={14} />
+                            </a>
+                          )}
+
+                          {has("vehicles.acquisition.manage") && (
+                            <button
+                              className="record-action edit"
+                              title="Mark Received"
+                              onClick={() => openReceive(vehicle)}
+                            >
+                              <PackageCheck size={14} />
+                            </button>
+                          )}
+                        </div>
+                      </td>
+                    </tr>
+                  ))
+                )}
+              </tbody>
+            </table>
+          </div>
+        </section>
+      )}
 
       {mode && (
         <div className="modal-backdrop" onMouseDown={closeModal}>
@@ -837,6 +1088,14 @@ function VehiclesPage() {
                   />
 
                   <TextField
+                    label="Registration"
+                    value={form.registration}
+                    setValue={(value) =>
+                      setField("registration", value)
+                    }
+                  />
+
+                  <TextField
                     label="Year"
                     type="number"
                     value={form.year}
@@ -894,6 +1153,12 @@ function VehiclesPage() {
                   />
 
                   <TextField
+                    label="Color"
+                    value={form.color}
+                    setValue={(value) => setField("color", value)}
+                  />
+
+                  <TextField
                     label="Engine"
                     value={form.engine}
                     setValue={(value) => setField("engine", value)}
@@ -905,6 +1170,12 @@ function VehiclesPage() {
                     setValue={(value) =>
                       setField("transmission", value)
                     }
+                  />
+
+                  <TextField
+                    label="Fuel"
+                    value={form.fuel_type}
+                    setValue={(value) => setField("fuel_type", value)}
                   />
 
                   <TextField
@@ -1124,6 +1395,68 @@ function VehiclesPage() {
         </div>
       )}
 
+      {receiveTarget && (
+        <Modal
+          title={`Mark ${receiveTarget.name} Received`}
+          eyebrow="Incoming / In Transit"
+          onClose={() => (!receiving ? setReceiveTarget(null) : undefined)}
+          width={420}
+        >
+          <form onSubmit={submitReceive}>
+            <Message error={receiveError} />
+            <div className="form-grid">
+              <div>
+                <label className="form-label">Received Date</label>
+                <input
+                  className="input"
+                  type="date"
+                  value={receiveDate}
+                  onChange={(e) => setReceiveDate(e.target.value)}
+                />
+              </div>
+              <SelectField
+                label="Storage Location"
+                value={receiveLocationId}
+                onChange={setReceiveLocationId}
+                required
+                options={[
+                  { value: "", label: "Select a location..." },
+                  ...locations.map((l) => ({
+                    value: l.id,
+                    label: l.name ? `${l.location_code} — ${l.name}` : l.location_code,
+                  })),
+                ]}
+              />
+            </div>
+            <div style={{ display: "flex", justifyContent: "flex-end", gap: 8, marginTop: 20 }}>
+              <button type="button" className="btn btn-secondary" onClick={() => setReceiveTarget(null)} disabled={receiving}>
+                Cancel
+              </button>
+              <button className="btn btn-primary" disabled={receiving}>
+                {receiving ? (
+                  <>
+                    <Loader2 size={15} className="spin" /> Saving...
+                  </>
+                ) : (
+                  "Mark Received"
+                )}
+              </button>
+            </div>
+          </form>
+        </Modal>
+      )}
+
+      {showWorkEntryModal && (
+        <Modal
+          title="Vehicle Work"
+          eyebrow="Add Work / Parts"
+          onClose={() => setShowWorkEntryModal(false)}
+          width={640}
+        >
+          <VehicleWorkEntryForm onSaved={() => setShowWorkEntryModal(false)} />
+        </Modal>
+      )}
+
       <style jsx global>{`
         .spin {
           animation: lal-spin 0.9s linear infinite;
@@ -1181,12 +1514,15 @@ function VehicleDetails({ vehicle }: { vehicle: Vehicle }) {
     ["VIN", vehicle.vin],
     ["Stock Number", vehicle.stock_number],
     ["Lot Number", vehicle.lot_number],
+    ["Registration", vehicle.registration],
     ["Year", vehicle.year],
     ["Make", vehicle.make_name],
     ["Model", vehicle.model_name],
     ["Trim", vehicle.trim],
+    ["Color", vehicle.color],
     ["Engine", vehicle.engine],
     ["Transmission", vehicle.transmission],
+    ["Fuel", vehicle.fuel_type],
     [
       "Mileage",
       vehicle.mileage !== null

@@ -3,7 +3,7 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   CheckCircle2, ChevronDown, ClipboardList, Code2, Download, History, ImagePlus, Loader2, Mic, Pencil, Plus,
-  RefreshCw, Send, Sparkles, Square, ThumbsUp, Wand2, X, XCircle,
+  RefreshCw, ScanLine, Send, Sparkles, Square, ThumbsUp, Wand2, X, XCircle,
 } from "lucide-react";
 import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
 
@@ -13,7 +13,9 @@ import {
 } from "@/components/RealUi";
 import { RequirePermission } from "@/components/RequirePermission";
 import { ReviewListingModal } from "@/components/ReviewListingModal";
-import { API_BASE_URL, AI_CHAT_TIMEOUT_MS, CurrentUser, apiFetch, apiUpload, getCurrentUser } from "@/lib/api";
+import { API_BASE_URL, AI_CHAT_TIMEOUT_MS, CurrentUser, apiFetch, apiUpload } from "@/lib/api";
+import { useAIChatSession } from "@/lib/hooks/useAIChatSession";
+import { useCurrentUser } from "@/lib/hooks/useCurrentUser";
 import { invalidate } from "@/lib/invalidate";
 import { queryKeys } from "@/lib/queryKeys";
 
@@ -57,6 +59,16 @@ type ContentSession={
   id:string;input_text:string;status:string;created_at:string;requested_channels:ChannelName[]|null;product_name:string|null;
 };
 type StudioAction={kind:"content_studio_result";sessionId:string;masterDraft:MasterProductDraft;channelResults:GenerateResponse["channel_results"]};
+
+// ---- Auction Slip -> AI Vehicle Intake -----------------------------------
+type AuctionSlipExtraction={
+  auction_source:string|null;lot_number:string|null;stock_number:string|null;vin:string|null;registration:string|null;
+  make:string|null;model:string|null;year:number|null;color:string|null;mileage:number|null;fuel:string|null;
+  transmission:string|null;engine:string|null;purchase_price:number|null;auction_fees:number|null;purchase_date:string|null;
+  missing_information:string[];confidence_notes:string[];
+};
+type AuctionSlipExtractResponse={file_id:string;extraction:AuctionSlipExtraction|null;warning:string|null};
+type AuctionSlipAction={kind:"auction_slip_review";fileId:string;extraction:AuctionSlipExtraction|null;warning:string|null};
 
 function draftTitle(d:ChannelDraft):string{
   return d.payload?.title
@@ -102,9 +114,13 @@ type ChatAction=
   | {kind:"channel_drafts";sessionId:string;productName:string;drafts:ChannelDraft[];masterDraft?:MasterProductDraft|null}
   | {kind:"generated_image";fileId:string;productName?:string|null}
   | {kind:"inventory_list";items:{product:string;location?:string;on_hand:number;reserved:number;available:number;status:string}[];label:string}
-  | StudioAction;
+  | StudioAction
+  | AuctionSlipAction;
 
-type ChatAttachment={previewUrl:string;fileId?:string};
+// previewUrl is a blob: URL, only ever valid for the tab session that
+// created it — optional so a restored (sessionStorage) attachment can carry
+// just a fileId and fall back to the server-backed mediaUrl() below.
+type ChatAttachment={previewUrl?:string;fileId?:string};
 
 type ChatMessage={id:string;role:"user"|"assistant";text:string;action?:ChatAction;attachments?:ChatAttachment[];createdAt:string};
 
@@ -216,6 +232,103 @@ function GeneratedImageCard({fileId,productName,onUse}:{
   </div>;
 }
 
+type AuctionSlipFormState={
+  auction_source:string;lot_number:string;stock_number:string;vin:string;registration:string;
+  make_name:string;model_name:string;year:string;color:string;mileage:string;fuel:string;
+  transmission:string;engine:string;purchase_price:string;auction_fees:string;transport_cost:string;purchase_date:string;
+};
+
+function extractionToForm(extraction:AuctionSlipExtraction|null):AuctionSlipFormState{
+  return {
+    auction_source:extraction?.auction_source||"",lot_number:extraction?.lot_number||"",
+    stock_number:extraction?.stock_number||"",vin:extraction?.vin||"",registration:extraction?.registration||"",
+    make_name:extraction?.make||"",model_name:extraction?.model||"",
+    year:extraction?.year!=null?String(extraction.year):"",color:extraction?.color||"",
+    mileage:extraction?.mileage!=null?String(extraction.mileage):"",fuel:extraction?.fuel||"",
+    transmission:extraction?.transmission||"",engine:extraction?.engine||"",
+    purchase_price:extraction?.purchase_price!=null?String(extraction.purchase_price):"",
+    auction_fees:extraction?.auction_fees!=null?String(extraction.auction_fees):"",
+    transport_cost:"",purchase_date:extraction?.purchase_date||"",
+  };
+}
+
+// "Review Vehicle Intake": pre-filled from AI extraction (or blank if
+// extraction failed/unavailable — the workflow still works, just manual).
+// [Add Vehicle] creates the vehicle as Incoming/In Transit, never silently.
+function AuctionSlipReviewCard({fileId,extraction,warning,onAdded}:{
+  fileId:string;extraction:AuctionSlipExtraction|null;warning:string|null;onAdded:(vehicleName:string)=>void;
+}){
+  const [form,setForm]=useState<AuctionSlipFormState>(()=>extractionToForm(extraction));
+  const [saving,setSaving]=useState(false);
+  const [error,setError]=useState("");
+  const [added,setAdded]=useState<string|null>(null);
+  const missing=extraction?.missing_information||[];
+
+  function set<K extends keyof AuctionSlipFormState>(k:K,v:string){setForm(f=>({...f,[k]:v}));}
+
+  async function submit(e:FormEvent){
+    e.preventDefault();setSaving(true);setError("");
+    try{
+      const vehicle=await apiFetch<{name:string}>("/vehicles/auction-slip/confirm",{method:"POST",body:JSON.stringify({
+        source_document_file_id:fileId,
+        auction_source:form.auction_source||null,lot_number:form.lot_number||null,stock_number:form.stock_number||null,
+        vin:form.vin||null,registration:form.registration||null,make_name:form.make_name||null,model_name:form.model_name||null,
+        year:form.year?Number(form.year):null,color:form.color||null,mileage:form.mileage?Number(form.mileage):null,
+        fuel:form.fuel||null,transmission:form.transmission||null,engine:form.engine||null,
+        purchase_price:form.purchase_price?Number(form.purchase_price):null,
+        auction_fees:form.auction_fees?Number(form.auction_fees):null,
+        transport_cost:form.transport_cost?Number(form.transport_cost):null,
+        purchase_date:form.purchase_date||null,
+      })});
+      setAdded(vehicle.name);
+      onAdded(vehicle.name);
+    }catch(e:any){setError(e?.message||"Unable to add this vehicle.");}
+    finally{setSaving(false);}
+  }
+
+  if(added){
+    return <div className="card" style={{padding:14,marginTop:10,color:"var(--success)"}}>
+      <CheckCircle2 size={14} style={{marginRight:6,verticalAlign:"-2px"}}/>
+      Added <strong>{added}</strong> as Incoming / In Transit. Mark it Received once it physically arrives.
+    </div>;
+  }
+
+  return <div className="card" style={{padding:14,marginTop:10,maxWidth:660}}>
+    <div className="eyebrow">Review Vehicle Intake</div>
+    {warning&&<div className="muted" style={{fontSize:12,marginTop:4}}>{warning}</div>}
+    <form onSubmit={submit}>
+      <div className="form-grid" style={{marginTop:10}}>
+        <Field label="Make" value={form.make_name} onChange={v=>set("make_name",v)}/>
+        <Field label="Model" value={form.model_name} onChange={v=>set("model_name",v)}/>
+        <Field label="Year" type="number" value={form.year} onChange={v=>set("year",v)}/>
+        <Field label="VIN" value={form.vin} onChange={v=>set("vin",v)}/>
+        <Field label="Registration" value={form.registration} onChange={v=>set("registration",v)}/>
+        <Field label="Stock Number" value={form.stock_number} onChange={v=>set("stock_number",v)}/>
+        <Field label="Lot Number" value={form.lot_number} onChange={v=>set("lot_number",v)}/>
+        <Field label="Color" value={form.color} onChange={v=>set("color",v)}/>
+        <Field label="Mileage" type="number" value={form.mileage} onChange={v=>set("mileage",v)}/>
+        <Field label="Fuel" value={form.fuel} onChange={v=>set("fuel",v)}/>
+        <Field label="Transmission" value={form.transmission} onChange={v=>set("transmission",v)}/>
+        <Field label="Engine" value={form.engine} onChange={v=>set("engine",v)}/>
+        <Field label="Auction / Source" value={form.auction_source} onChange={v=>set("auction_source",v)}/>
+        <Field label="Purchase Price" type="number" step="0.01" value={form.purchase_price} onChange={v=>set("purchase_price",v)}/>
+        <Field label="Auction Fees" type="number" step="0.01" value={form.auction_fees} onChange={v=>set("auction_fees",v)}/>
+        <Field label="Transport Cost" type="number" step="0.01" value={form.transport_cost} onChange={v=>set("transport_cost",v)}/>
+        <Field label="Purchase Date" type="date" value={form.purchase_date} onChange={v=>set("purchase_date",v)}/>
+      </div>
+      {missing.length>0&&<div className="muted" style={{fontSize:11,marginTop:10}}>
+        AI couldn't read: {missing.join(", ")} — please fill these in.
+      </div>}
+      {error&&<div style={{color:"var(--danger)",fontSize:12,marginTop:8}}>{error}</div>}
+      <div style={{display:"flex",justifyContent:"flex-end",marginTop:14}}>
+        <button className="btn btn-primary" disabled={saving}>
+          {saving?<><Loader2 size={14} className="spin"/> Adding...</>:"Add Vehicle"}
+        </button>
+      </div>
+    </form>
+  </div>;
+}
+
 function AIPage(){
   const [view,setView]=useState<"chat"|"history">("chat");
   const [historyTab,setHistoryTab]=useState<HistoryTab>("Requests");
@@ -223,18 +336,34 @@ function AIPage(){
   const [requests,setRequests]=useState<AIRequest[]>([]);
   const [approvals,setApprovals]=useState<Approval[]>([]);
   const [calls,setCalls]=useState<FunctionCall[]>([]);
-  const [user,setUser]=useState<CurrentUser|null>(null);
-  const [loading,setLoading]=useState(true);
+  // DashboardShell (this page's only parent) already fetched and cached
+  // /auth/me before any child of it renders — reusing that query here means
+  // `user` is available synchronously on first render, not a second,
+  // duplicate /auth/me request every time this page mounts.
+  const { data: user } = useCurrentUser();
+  const [adminLoading,setAdminLoading]=useState(false);
   const [error,setError]=useState("");
   const [success,setSuccess]=useState("");
   const [mode,setMode]=useState<"function"|"approval"|null>(null);
   const [saving,setSaving]=useState(false);
 
-  const [messages,setMessages]=useState<ChatMessage[]>([{
+  const welcomeMessage=useMemo<ChatMessage>(()=>({
     id:uid(),role:"assistant",
     text:"Hi! Ask me anything about sales, inventory, customers, payments or purchases — I'll figure out what to do.",
     createdAt:new Date().toISOString(),
-  }]);
+  }),[]);
+  // Keeps the conversation alive across navigation for the current user's
+  // tab session (sessionStorage, cleared on logout — see DashboardShell).
+  // Attachments are stripped of their blob: previewUrl before persisting;
+  // MessageAttachments already falls back to mediaUrl(fileId) when absent.
+  const {messages,setMessages}=useAIChatSession<ChatMessage>({
+    userId:user?.id,
+    initialMessages:[welcomeMessage],
+    sanitize:msgs=>msgs.map(m=>m.attachments?{
+      ...m,
+      attachments:m.attachments.filter(a=>a.fileId).map(a=>({fileId:a.fileId})),
+    }:m),
+  });
   const [composer,setComposer]=useState("");
   const [sending,setSending]=useState(false);
   const [listening,setListening]=useState(false);
@@ -242,6 +371,8 @@ function AIPage(){
   const recognitionRef=useRef<any>(null);
   const bottomRef=useRef<HTMLDivElement>(null);
   const fileInputRef=useRef<HTMLInputElement>(null);
+  const auctionSlipInputRef=useRef<HTMLInputElement>(null);
+  const [scanningSlip,setScanningSlip]=useState(false);
   const queryClient=useQueryClient();
 
   // Optional channel chips hint the backend which drafts to create.
@@ -299,16 +430,15 @@ function AIPage(){
 
   const pendingApprovals=useMemo(()=>approvals.filter(a=>a.status==="pending").length,[approvals]);
 
-  async function load(){
-    setLoading(true);setError("");
+  // Functions/Requests/Approvals/Function-Calls are admin-oversight tabs
+  // (settings.manage / approvals.view) — genuinely irrelevant to the chat
+  // itself, so this only ever gates the History view, never the chat.
+  async function loadAdminData(currentUser:CurrentUser){
+    setAdminLoading(true);setError("");
     try{
-      const me=await getCurrentUser();
-      setUser(me);
-      const perms=new Set(me.permissions||[]);
+      const perms=new Set(currentUser.permissions||[]);
 
-      // The Functions/Requests/Approvals/Function-Calls admin tabs are
-      // genuinely admin-only surfaces (settings.manage / approvals.view) —
-      // fetching them for every employee who merely has ai.use would 403
+      // Fetching these for every employee who merely has ai.use would 403
       // and surface a scary permission error on a page everyone can open.
       const [f,r,a,c]=await Promise.all([
         perms.has("settings.manage")?apiFetch<FunctionDefinition[]>("/ai-admin/functions"):Promise.resolve([]),
@@ -318,10 +448,21 @@ function AIPage(){
       ]);
       setFunctions(f);setRequests(r);setApprovals(a);setCalls(c);
     }catch(e:any){setError(e?.message||"Unable to load AI Command Center data.");}
-    finally{setLoading(false);}
+    finally{setAdminLoading(false);}
   }
 
-  useEffect(()=>{load();},[]);
+  function refresh(){
+    return user?loadAdminData(user):Promise.resolve();
+  }
+
+  // Runs once per signed-in user id (not on every background /auth/me
+  // refresh, which would otherwise refire this every staleTime tick).
+  const adminDataLoadedForUserId=useRef<string|null>(null);
+  useEffect(()=>{
+    if(!user||adminDataLoadedForUserId.current===user.id)return;
+    adminDataLoadedForUserId.current=user.id;
+    loadAdminData(user);
+  },[user]);
   useEffect(()=>{
     if(!visibleHistoryTabs.includes(historyTab)&&visibleHistoryTabs.length>0){
       setHistoryTab(visibleHistoryTabs[0]);
@@ -429,6 +570,34 @@ function AIPage(){
     }
   }
 
+  // "Scan Auction Slip" is a dedicated upload+extract call, not a chat tool
+  // call — the user shouldn't have to type a prompt to scan a document.
+  // Persistence and manual entry both still work if AI extraction fails.
+  async function scanAuctionSlip(file:File){
+    if(scanningSlip)return;
+    setScanningSlip(true);setError("");
+    const previewUrl=URL.createObjectURL(file);
+    setMessages(m=>[...m,{id:uid(),role:"user",text:"Scan auction slip",attachments:[{previewUrl}],createdAt:new Date().toISOString()}]);
+    try{
+      const form=new FormData();
+      form.append("file",file);
+      const res=await apiFetch<AuctionSlipExtractResponse>("/vehicles/auction-slip/extract",{
+        method:"POST",body:form,timeoutMs:AI_CHAT_TIMEOUT_MS,
+      });
+      const e=res.extraction;
+      const introText=e
+        ?`I found ${[e.year,e.make,e.model].filter(Boolean).join(" ")||"a vehicle"}`
+          +`${e.vin?`, VIN ${e.vin}`:""}${e.purchase_price!=null?`, purchased for $${e.purchase_price}`:""}. `
+          +"Please review the details before adding it as Incoming."
+        :(res.warning||"I saved the file. Please fill in the vehicle details manually below.");
+      pushAssistant(introText,{kind:"auction_slip_review",fileId:res.file_id,extraction:e,warning:res.warning});
+    }catch(e:any){
+      pushAssistant(`Sorry — ${e?.message||"I couldn't process that file"}.`,{kind:"error"});
+    }finally{
+      setScanningSlip(false);
+    }
+  }
+
   async function askAIOnDraft(draft:ChannelDraft){
     const instruction=prompt(`What should change on this ${draft.channel} draft?`,"");
     if(!instruction)return;
@@ -505,7 +674,7 @@ function AIPage(){
         handler_config:handlerConfig,required_permission_key:functionForm.required_permission_key||null,
         risk_level:functionForm.risk_level,approval_policy:functionForm.approval_policy,is_active:true,
       })});
-      setSuccess("Controlled function definition created.");setMode(null);await load();
+      setSuccess("Controlled function definition created.");setMode(null);await refresh();
     }catch(e:any){setError(e?.message||"Unable to create function.");}
     finally{setSaving(false);}
   }
@@ -514,7 +683,7 @@ function AIPage(){
     if(!isManager)return;
     try{
       await apiFetch(`/ai-admin/functions/${f.id}`,{method:"PUT",body:JSON.stringify({is_active:!f.is_active})});
-      setSuccess(`Function ${f.is_active?"disabled":"enabled"}.`);await load();
+      setSuccess(`Function ${f.is_active?"disabled":"enabled"}.`);await refresh();
     }catch(e:any){setError(e?.message||"Unable to update function.");}
   }
 
@@ -528,7 +697,7 @@ function AIPage(){
         approval_type:approvalForm.approval_type,risk_level:approvalForm.risk_level,title:approvalForm.title,
         explanation:approvalForm.explanation||null,payload,
       })});
-      setSuccess("Approval request created.");setMode(null);await load();
+      setSuccess("Approval request created.");setMode(null);await refresh();
     }catch(e:any){setError(e?.message||"Unable to create approval.");}
     finally{setSaving(false);}
   }
@@ -537,19 +706,19 @@ function AIPage(){
     const note=prompt(`${decision==="approve"?"Approval":"Rejection"} notes (optional)`,"")??"";
     try{
       await apiFetch(`/ai-admin/approvals/${a.id}/${decision}`,{method:"POST",body:JSON.stringify({decision_notes:note||null})});
-      setSuccess(`Approval ${decision==="approve"?"approved":"rejected"}.`);await load();
+      setSuccess(`Approval ${decision==="approve"?"approved":"rejected"}.`);await refresh();
     }catch(e:any){setError(e?.message||"Unable to decide approval.");}
   }
 
   const hasUserTurn=messages.some(m=>m.role==="user");
   const showShortcuts=!hasUserTurn||shortcutsOpen;
 
-  return <div className={!loading&&view==="chat"?"ai-workspace":undefined}>
+  return <div className={view==="chat"?"ai-workspace":undefined}>
     {view==="history"&&<div className="page-header" style={{padding:"26px 26px 0"}}>
       <div><div className="eyebrow">AI</div><h1 className="page-title">AI Command Center</h1>
         <p className="page-copy">Request history, approvals and content sessions.</p></div>
       <div style={{display:"flex",gap:8}}>
-        <button className="btn btn-secondary" onClick={load}><RefreshCw size={15}/>Refresh</button>
+        <button className="btn btn-secondary" onClick={refresh}><RefreshCw size={15}/>Refresh</button>
         <button className="btn btn-secondary" onClick={()=>setView("chat")}><Sparkles size={15}/>Chat</button>
         <button className="btn btn-primary"><History size={15}/>History{pendingApprovals>0?` (${pendingApprovals} pending)`:""}</button>
       </div>
@@ -557,9 +726,13 @@ function AIPage(){
 
     <Message error={error} success={success}/>
 
-    {loading&&<div className="card" style={{padding:30,textAlign:"center",margin:26}}><Loader2 className="spin" size={18}/> Loading...</div>}
+    {/* Admin-oversight data (Functions/Requests/Approvals/Function-Calls) is
+        irrelevant to chat — only the History view ever waits on it, so
+        returning to the chat (including a restored conversation) never sits
+        behind an unrelated loading spinner. */}
+    {view==="history"&&adminLoading&&<div className="card" style={{padding:30,textAlign:"center",margin:26}}><Loader2 className="spin" size={18}/> Loading...</div>}
 
-    {!loading&&view==="chat"&&<>
+    {view==="chat"&&<>
       <div className="ai-thread">
         <div className="ai-column">
           <div className="ai-intro">
@@ -651,6 +824,17 @@ function AIPage(){
                     <Download size={12}/>Download All
                   </button>
                 </div>}
+
+                {msg.action?.kind==="auction_slip_review"&&
+                  <AuctionSlipReviewCard
+                    fileId={msg.action.fileId}
+                    extraction={msg.action.extraction}
+                    warning={msg.action.warning}
+                    onAdded={name=>{
+                      pushAssistant(`${name} was added as Incoming. You'll find it under Vehicles → Incoming / In Transit.`,{kind:"result"});
+                      invalidate(queryClient,["vehicles","inventory","dashboard"]);
+                    }}
+                  />}
               </div>
             </div>
           )}
@@ -661,7 +845,7 @@ function AIPage(){
 
       <div className="ai-composer-dock">
         <div className="ai-view-switch">
-          <button className="btn btn-ghost" style={{fontSize:12,padding:"6px 10px"}} onClick={load}><RefreshCw size={14}/>Refresh</button>
+          <button className="btn btn-ghost" style={{fontSize:12,padding:"6px 10px"}} onClick={refresh}><RefreshCw size={14}/>Refresh</button>
           <button className="btn btn-primary" style={{fontSize:12,padding:"6px 10px"}}><Sparkles size={14}/>Chat</button>
           <button className="btn btn-ghost" style={{fontSize:12,padding:"6px 10px"}} onClick={()=>setView("history")}>
             <History size={14}/>History{pendingApprovals>0?` (${pendingApprovals})`:""}
@@ -704,6 +888,14 @@ function AIPage(){
             <button type="button" className="icon-btn" title="Attach product images" onClick={()=>fileInputRef.current?.click()}>
               <ImagePlus size={16}/>
             </button>
+            {(user?.permissions||[]).includes("vehicles.acquisition.manage")&&<>
+              <input ref={auctionSlipInputRef} type="file" accept="image/*,application/pdf" capture="environment" hidden
+                onChange={e=>{const f=e.target.files?.[0];e.target.value="";if(f)scanAuctionSlip(f);}}/>
+              <button type="button" className="btn btn-ghost" style={{fontSize:12,padding:"8px 10px",whiteSpace:"nowrap"}}
+                title="Camera / Upload" disabled={scanningSlip} onClick={()=>auctionSlipInputRef.current?.click()}>
+                {scanningSlip?<Loader2 size={15} className="spin"/>:<ScanLine size={15}/>} Scan Auction Slip
+              </button>
+            </>}
             <textarea
               className="textarea"
               style={{flex:1}}
@@ -728,7 +920,7 @@ function AIPage(){
       </div>
     </>}
 
-    {!loading&&view==="history"&&<div style={{padding:"16px 26px 26px"}}>
+    {!adminLoading&&view==="history"&&<div style={{padding:"16px 26px 26px"}}>
       <div style={{display:"flex",gap:8,flexWrap:"wrap",marginBottom:16}}>
         {visibleHistoryTabs.map(x=><button key={x} className={`btn ${historyTab===x?"btn-primary":"btn-secondary"}`} onClick={()=>setHistoryTab(x)}>{x}</button>)}
       </div>

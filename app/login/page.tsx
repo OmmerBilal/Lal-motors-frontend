@@ -3,6 +3,7 @@
 import { FormEvent, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
+import { useQueryClient } from "@tanstack/react-query";
 import {
   ArrowLeft,
   CarFront,
@@ -14,10 +15,14 @@ import {
 } from "lucide-react";
 
 import { ThemeToggle } from "@/components/ThemeToggle";
-import { apiFetch } from "@/lib/api";
+import { apiFetch, CurrentUser } from "@/lib/api";
+import { queryKeys } from "@/lib/queryKeys";
+
+type LoginResponse = { message: string; user: CurrentUser };
 
 export default function LoginPage() {
   const router = useRouter();
+  const queryClient = useQueryClient();
 
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
@@ -31,13 +36,23 @@ export default function LoginPage() {
     setLoading(true);
 
     try {
-      await apiFetch("/auth/login", {
+      const loginResult = await apiFetch<LoginResponse>("/auth/login", {
         method: "POST",
         body: JSON.stringify({
           email: email.trim(),
           password,
         }),
       });
+
+      // The login response already carries the same AuthUser shape /auth/me
+      // returns (both built by auth_service._serialize_user on the backend)
+      // — seed it directly instead of letting DashboardShell's
+      // useCurrentUser() fire a second, fully redundant round-trip. This
+      // request measured 1.3-2.8s on its own; skipping it outright (not
+      // just starting it earlier) is what actually removes that cost.
+      // /auth/me still runs normally on every other route/refresh — this
+      // only short-circuits the one path where the data was just returned.
+      queryClient.setQueryData(queryKeys.auth.me(), loginResult.user);
 
       router.replace("/dashboard");
       router.refresh();

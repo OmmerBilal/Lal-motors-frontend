@@ -18,6 +18,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { allNavigationItems, navGroups } from "@/lib/navigation";
 import { ThemeToggle } from "@/components/ThemeToggle";
 import { changePassword, logout } from "@/lib/api";
+import { clearAIChatSession } from "@/lib/hooks/useAIChatSession";
 import { useCurrentUser } from "@/lib/hooks/useCurrentUser";
 import { usePermissions } from "@/lib/hooks/usePermissions";
 import { usePrefetchModules } from "@/lib/hooks/usePrefetchModules";
@@ -293,6 +294,7 @@ export function DashboardShell({ children }: { children: React.ReactNode }) {
 
   async function handleLogout() {
     setLoggingOut(true);
+    const loggedOutUserId = user?.id;
     try {
       await logout();
     } finally {
@@ -300,6 +302,10 @@ export function DashboardShell({ children }: { children: React.ReactNode }) {
       // by the same user) never renders a stale screen of someone else's
       // business data for even a frame.
       queryClient.clear();
+      // AI chat is session-scoped per user (sessionStorage), not covered by
+      // the query cache above — explicit clear so it never resurfaces for
+      // the next person to sign in on this browser/tab.
+      clearAIChatSession(loggedOutUserId);
       router.replace("/login");
       router.refresh();
       setLoggingOut(false);

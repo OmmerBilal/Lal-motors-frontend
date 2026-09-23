@@ -44,6 +44,27 @@ html[data-theme="dark"] {
 }
 
 * { box-sizing: border-box; }
+
+/* Themed scrollbars — one global rule so every existing overflow container
+   (sidebar nav, AI conversation column, modals, tables) inherits it
+   automatically instead of needing per-component scrollbar CSS. Track
+   blends into the surrounding surface; thumb uses the existing subtle
+   border color; hover strengthens to --muted. Works in both themes since
+   it reads the same custom properties they already redefine. */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--line-strong) transparent;
+}
+::-webkit-scrollbar { width: 10px; height: 10px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb {
+  background-color: var(--line-strong);
+  border-radius: 999px;
+  border: 2px solid transparent;
+  background-clip: padding-box;
+}
+::-webkit-scrollbar-thumb:hover { background-color: var(--muted); }
+
 html { scroll-behavior: smooth; }
 body {
   margin: 0;

@@ -65,6 +65,9 @@ export const queryKeys = {
     makes: () => ["vehicles", "makes"] as const,
     models: (makeId: string) => ["vehicles", "models", makeId] as const,
     locations: () => ["vehicles", "locations"] as const,
+    incoming: (params?: Record<string, unknown>) => ["vehicles", "incoming", params ?? {}] as const,
+    workEntries: (vehicleId: string) => ["vehicles", "detail", vehicleId, "workEntries"] as const,
+    costSummary: (vehicleId: string) => ["vehicles", "detail", vehicleId, "costSummary"] as const,
   },
 
   newItems: {

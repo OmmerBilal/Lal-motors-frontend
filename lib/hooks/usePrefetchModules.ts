@@ -15,6 +15,9 @@ import { queryKeys } from "@/lib/queryKeys";
 // omitting a filter the page always includes, even as `true`) populates a
 // cache entry the page will never read, silently defeating the prefetch.
 const modules: Array<{ key: readonly unknown[]; path: string; staleTime: number; perm: string }> = [
+  // Highest priority: Vehicles is now a core workflow (auction intake,
+  // incoming/received, work & costs), fetched before every other module.
+  { key: queryKeys.vehicles.list({ search: undefined, inventory_status: undefined, include_archived: false }), path: "/vehicles?include_archived=false&limit=200", staleTime: 2 * 60 * 1000, perm: "vehicles.view" },
   { key: queryKeys.inventory.list({ search: undefined, item_type: undefined, location_id: undefined }), path: "/inventory?limit=300", staleTime: 2 * 60 * 1000, perm: "inventory.view" },
   { key: queryKeys.customers.list({ search: undefined, customer_type: undefined, active_only: true }), path: "/customers?active_only=true&limit=300", staleTime: 5 * 60 * 1000, perm: "customers.view" },
   { key: queryKeys.sales.list({ search: undefined, order_status: undefined }), path: "/sales-orders?limit=300", staleTime: 90 * 1000, perm: "sales.view" },

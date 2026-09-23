@@ -17,7 +17,9 @@ type ChannelDraft = {
 };
 type Account = {
   id: string; display_name?: string; account_name: string; shop_domain?: string | null; status: string;
-  facebook_page_name?: string | null; instagram_username?: string | null; has_instagram?: boolean;
+  facebook_page_name?: string | null; facebook_page_id?: string | null;
+  instagram_username?: string | null; has_instagram?: boolean; has_facebook?: boolean;
+  destination_type?: string | null; auth_path?: string | null;
 };
 type ReviewField = { key: string; label: string; required: boolean; kind: string };
 type ReviewPackage = {
@@ -85,10 +87,25 @@ export function ReviewListingModal({
     if (pack.draft.channel === "meta") {
       const caption = payload.caption || payload.facebook?.caption || payload.instagram?.primary_caption || "";
       setValues(s => ({ ...s, caption: caption || s.caption || "" }));
-      const selected = pack.accounts.find(a => String(a.id) === accountId) || pack.accounts[0];
-      setPublishTargets(selected?.has_instagram ? ["facebook"] : ["facebook"]);
     }
   }, [pack]);
+
+  const selectedMetaAccount = pack?.accounts.find(a => String(a.id) === accountId) || pack?.accounts[0];
+  const isIgOnly = Boolean(
+    selectedMetaAccount && (
+      selectedMetaAccount.destination_type === "instagram"
+      || selectedMetaAccount.auth_path === "instagram_login"
+      || (!selectedMetaAccount.facebook_page_id && (selectedMetaAccount.has_instagram || selectedMetaAccount.instagram_username))
+    ),
+  );
+  const isFbOnly = Boolean(selectedMetaAccount && !isIgOnly && !selectedMetaAccount.has_instagram);
+  const metaHasInstagram = Boolean(selectedMetaAccount?.has_instagram || isIgOnly);
+
+  useEffect(() => {
+    if (!pack || pack.draft.channel !== "meta") return;
+    if (isIgOnly) setPublishTargets(["instagram"]);
+    else if (isFbOnly) setPublishTargets(["facebook"]);
+  }, [pack, accountId, isIgOnly, isFbOnly]);
 
   const missingNow = useMemo(() => {
     if (!pack) return [];
@@ -159,8 +176,13 @@ export function ReviewListingModal({
   async function complete(publish: boolean) {
     setBusy(true); setError("");
     try {
-      if (missingNow.length > 0) {
+      if (missingNow.length > 0 && (publish || pack?.draft.channel !== "meta")) {
         setError(`Complete required listing fields before approval. Missing: ${missingNow.join(", ")}`);
+        setBusy(false);
+        return;
+      }
+      if (!publish && pack?.draft.channel === "meta" && !(values.caption || "").trim()) {
+        setError("Complete required listing fields before approval. Missing: caption");
         setBusy(false);
         return;
       }
@@ -204,24 +226,31 @@ export function ReviewListingModal({
   const fields = pack?.fields || [];
   const canPublish = (pack?.draft.channel === "shopify" || pack?.draft.channel === "ebay" || pack?.draft.channel === "meta") && (pack?.accounts.length || 0) > 0;
   const blocked = busy || missingNow.length > 0;
-  const selectedMetaAccount = pack?.accounts.find(a => String(a.id) === accountId) || pack?.accounts[0];
-  const metaHasInstagram = Boolean(selectedMetaAccount?.has_instagram);
+  const isMeta = pack?.draft.channel === "meta";
+  const blockedApprove = busy || (isMeta ? !(values.caption || "").trim() : missingNow.length > 0);
 
-  return <Modal title="Review & Complete Listing" eyebrow={pack?.draft.channel || draft.channel} onClose={onClose} width={860}>
+  return <Modal title="Review & Complete Listing" eyebrow={pack?.draft.channel || draft.channel} onClose={onClose} width={isMeta ? 720 : 860}>
     {reviewQuery.isLoading && <div className="muted">Loading listing review…</div>}
     <Message error={error || (reviewQuery.error instanceof Error ? reviewQuery.error.message : "")} success="" />
     {pack && <>
       {pack.tracked_missing_information?.length > 0 && <div className="card" style={{ padding: 12, marginBottom: 12 }}>
-        <strong>Missing information</strong>
+        <strong>AI noted missing information</strong>
+        <div className="muted" style={{ fontSize: 12, marginTop: 4 }}>{isMeta ? "These notes do not block a social post unless Meta actually requires the field." : "Review these gaps before publishing."}</div>
         <ul style={{ margin: "8px 0 0", paddingLeft: 18 }}>{pack.tracked_missing_information.map(item => <li key={item}>{item}</li>)}</ul>
       </div>}
       {missingNow.length > 0 && <div className="card" style={{ padding: 12, marginBottom: 12, borderColor: "var(--danger)" }}>
-        <strong>Required before approval</strong>
+        <strong>Required before {isMeta ? "publishing" : "approval"}</strong>
         <div className="muted" style={{ fontSize: 12, marginTop: 4 }}>{missingNow.join(", ")}</div>
       </div>}
-      {pack.catalog_item && <div className="muted" style={{ fontSize: 12, marginBottom: 12 }}>
+      {!isMeta && pack.catalog_item && <div className="muted" style={{ fontSize: 12, marginBottom: 12 }}>
         Existing product: {pack.catalog_item.name} ({pack.catalog_item.item_code || pack.catalog_item.sku || "no SKU"})
       </div>}
+
+      {isMeta ? (
+        <div style={{ display: "grid", gap: 16 }}>
+          <TextAreaField label="Caption *" value={values.caption || ""} onChange={v => setValues(s => ({ ...s, caption: v }))} />
+        </div>
+      ) : (
       <div className="form-grid">
         {fields.filter(f => f.kind !== "images").map(field => {
           const required = field.required && !(values[field.key] || "").trim();
@@ -236,14 +265,15 @@ export function ReviewListingModal({
           </div>;
         })}
       </div>
+      )}
 
-      {fields.some(f => f.kind === "images") && <div style={{ marginTop: 16 }}>
-        <div className="panel-head"><h3 style={{ margin: 0 }}>Images</h3>
+      {(isMeta || fields.some(f => f.kind === "images")) && <div style={{ marginTop: 16 }}>
+        <div className="panel-head"><h3 style={{ margin: 0 }}>Media</h3>
           <button className="btn btn-secondary" disabled={busy} onClick={() => fileRef.current?.click()}><ImagePlus size={14} />Upload</button>
         </div>
         <input ref={fileRef} type="file" accept="image/jpeg,image/png,image/webp" multiple hidden onChange={e => { uploadImages(e.target.files); e.target.value = ""; }} />
         {imageIds.length === 0
-          ? <div className="card" style={{ padding: 16, textAlign: "center" }}><Upload size={16} /><div className="muted" style={{ marginTop: 6 }}>No images yet{fields.some(f => f.kind === "images" && f.required) ? " — required before publishing." : "."}</div></div>
+          ? <div className="card" style={{ padding: 16, textAlign: "center" }}><Upload size={16} /><div className="muted" style={{ marginTop: 6 }}>{isMeta ? (publishTargets.includes("instagram") ? "Instagram feed posts need a jpeg or png image." : "Optional for Facebook text posts.") : `No images yet${fields.some(f => f.kind === "images" && f.required) ? " — required before publishing." : "."}`}</div></div>
           : <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>{imageIds.map((id, index) =>
             <div key={id} className="card" style={{ padding: 8, width: 128 }}>
               <img src={mediaUrl(id)} alt="" style={{ width: 112, height: 112, objectFit: "cover", borderRadius: 8 }} />
@@ -257,7 +287,7 @@ export function ReviewListingModal({
       </div>}
 
       {canPublish && <div style={{ marginTop: 16 }}>
-        <div className="form-label">Publish to {pack.requires_account_selection ? "*" : ""}</div>
+        <div className="form-label">{isMeta ? "Destination" : `Publish to ${pack.requires_account_selection ? "*" : ""}`}</div>
         <ProviderAccountSelector
           accounts={pack.accounts}
           value={accountId}
@@ -265,19 +295,22 @@ export function ReviewListingModal({
           requireSelection={pack.requires_account_selection}
           label=""
         />
-        {pack.draft.channel === "meta" && <div style={{ display: "grid", gap: 8, marginTop: 10 }}>
-          <label style={{ display: "flex", gap: 8, alignItems: "center" }}>
+        {isMeta && <div style={{ display: "grid", gap: 8, marginTop: 10 }}>
+          <div className="form-label">Publish to</div>
+          {!isIgOnly && <label style={{ display: "flex", gap: 8, alignItems: "center" }}>
             <input type="checkbox" checked={publishTargets.includes("facebook")} onChange={e => {
               setPublishTargets(curr => e.target.checked ? Array.from(new Set([...curr, "facebook"])) : curr.filter(x => x !== "facebook"));
             }} />
             Facebook Page{selectedMetaAccount?.facebook_page_name ? ` (${selectedMetaAccount.facebook_page_name})` : ""}
-          </label>
-          <label style={{ display: "flex", gap: 8, alignItems: "center" }}>
+          </label>}
+          {!isFbOnly && <label style={{ display: "flex", gap: 8, alignItems: "center" }}>
             <input type="checkbox" disabled={!metaHasInstagram} checked={publishTargets.includes("instagram")} onChange={e => {
               setPublishTargets(curr => e.target.checked ? Array.from(new Set([...curr, "instagram"])) : curr.filter(x => x !== "instagram"));
             }} />
             Instagram{metaHasInstagram ? (selectedMetaAccount?.instagram_username ? ` (@${selectedMetaAccount.instagram_username})` : "") : " (not linked to this Page)"}
-          </label>
+          </label>}
+          {isIgOnly && <div className="muted" style={{ fontSize: 12 }}>This destination is Instagram only.</div>}
+          {isFbOnly && <div className="muted" style={{ fontSize: 12 }}>This destination is a Facebook Page. Instagram is not linked.</div>}
           <div className="muted" style={{ fontSize: 12 }}>Nothing is posted until you choose a destination. Facebook and Instagram are separate publishes.</div>
         </div>}
         {pack.listings.length > 0 && <div className="muted" style={{ fontSize: 12, marginTop: 6 }}>
@@ -287,7 +320,7 @@ export function ReviewListingModal({
 
       <div style={{ display: "flex", justifyContent: "flex-end", gap: 8, marginTop: 18, flexWrap: "wrap" }}>
         <button className="btn btn-secondary" disabled={busy} onClick={onClose}>Cancel</button>
-        <button className="btn btn-secondary" disabled={blocked} onClick={() => complete(false)}>Approve</button>
+        <button className="btn btn-secondary" disabled={blockedApprove} onClick={() => complete(false)}>Approve</button>
         {canPublish && <button className="btn btn-primary" disabled={blocked || (pack.requires_account_selection && !accountId) || (pack.draft.channel === "meta" && publishTargets.length === 0)} onClick={() => complete(true)}>
           {pack.draft.channel === "meta" ? "Publish to selected destination" : "Create unpublished listing"}
         </button>}
