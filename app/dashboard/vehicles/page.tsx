@@ -8,7 +8,6 @@ import {
   Loader2,
   PackageCheck,
   Pencil,
-  Plus,
   RefreshCw,
   Search,
   Wrench,
@@ -25,6 +24,7 @@ import {
 
 import { Message, Modal, SelectField } from "@/components/RealUi";
 import { RequirePermission } from "@/components/RequirePermission";
+import { SmartIntakeLauncher } from "@/components/SmartIntakeLauncher";
 import { VehicleWorkEntryForm } from "@/components/VehicleWorkEntryForm";
 import { API_BASE_URL, ApiError, apiFetch } from "@/lib/api";
 import { usePermissions } from "@/lib/hooks/usePermissions";
@@ -576,9 +576,12 @@ function VehiclesPage() {
             <RefreshCw size={15} /> Refresh
           </button>
 
-          <button className="btn btn-primary" onClick={openCreate}>
-            <Plus size={15} /> Add Vehicle
-          </button>
+          <SmartIntakeLauncher
+            entityType="vehicle"
+            label="Add Vehicle"
+            onManual={openCreate}
+            onBatchCreated={() => invalidate(queryClient, ["vehicles", "inventory", "dashboard"])}
+          />
         </div>
       </div>
 

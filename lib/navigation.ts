@@ -22,6 +22,7 @@ import {
   Settings,
   ClipboardCheck,
   ShieldCheck,
+  History,
 } from "lucide-react";
 
 export const navGroups = [
@@ -39,6 +40,7 @@ export const navGroups = [
       { href: "/dashboard/parts", label: "Used Parts", icon: PackageSearch, keywords: "parts used catalog", requiredPermission: "used_parts.view" },
       { href: "/dashboard/new-items", label: "New Items", icon: Box, keywords: "new products items catalog", requiredPermission: "new_items.view" },
       { href: "/dashboard/inventory", label: "Inventory", icon: Boxes, keywords: "stock warehouse location quantity reserve receive transfer", requiredPermission: "inventory.view" },
+      { href: "/dashboard/import-history", label: "Import History", icon: History, keywords: "smart intake import bulk raw scan auction history audit", requiredPermission: "ai.use" },
       { href: "/dashboard/customers", label: "Customers", icon: Users, keywords: "crm customer contacts", requiredPermission: "customers.view" },
       { href: "/dashboard/sales", label: "Sales", icon: ShoppingCart, keywords: "sales orders payment reserve fulfill return customer", requiredPermission: "sales.view" },
       { href: "/dashboard/suppliers", label: "Suppliers", icon: Factory, keywords: "vendors procurement supplier", requiredPermission: "suppliers.view" },

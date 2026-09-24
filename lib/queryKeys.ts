@@ -70,6 +70,10 @@ export const queryKeys = {
     costSummary: (vehicleId: string) => ["vehicles", "detail", vehicleId, "costSummary"] as const,
   },
 
+  smartIntake: {
+    batch: (batchId: string) => ["smartIntake", "batch", batchId] as const,
+  },
+
   newItems: {
     list: (params?: Record<string, unknown>) => ["newItems", "list", params ?? {}] as const,
     detail: (id: string) => ["newItems", "detail", id] as const,

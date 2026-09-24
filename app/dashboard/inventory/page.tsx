@@ -21,6 +21,7 @@ import {
 
 import { RequirePermission } from "@/components/RequirePermission";
 import { StatusBadge } from "@/components/RealUi";
+import { SmartIntakeLauncher } from "@/components/SmartIntakeLauncher";
 import { apiFetch } from "@/lib/api";
 import { invalidate } from "@/lib/invalidate";
 import { useCurrentUser } from "@/lib/hooks/useCurrentUser";
@@ -355,6 +356,12 @@ function InventoryPage() {
           >
             <ArrowRightLeft size={15} /> Transfer
           </button>
+
+          <SmartIntakeLauncher
+            entityType="inventory"
+            label="Receive Stock"
+            onBatchCreated={() => invalidate(queryClient, ["inventory", "vehicles", "newItems", "dashboard"])}
+          />
         </div>
       </div>
 

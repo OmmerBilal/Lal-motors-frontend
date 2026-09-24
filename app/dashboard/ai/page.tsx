@@ -11,10 +11,13 @@ import {
   EmptyRow, Field, GlobalSpinStyle, Message,
   Modal, SelectField, StatusBadge, TextAreaField, labelize,
 } from "@/components/RealUi";
+import { type Batch, BatchReviewTable } from "@/components/BatchReviewTable";
+import { AIProgressIndicator } from "@/components/AIProgressIndicator";
 import { RequirePermission } from "@/components/RequirePermission";
 import { ReviewListingModal } from "@/components/ReviewListingModal";
 import { API_BASE_URL, AI_CHAT_TIMEOUT_MS, CurrentUser, apiFetch, apiUpload } from "@/lib/api";
 import { useAIChatSession } from "@/lib/hooks/useAIChatSession";
+import { newRequestId, useAIProgress } from "@/lib/hooks/useAIProgress";
 import { useCurrentUser } from "@/lib/hooks/useCurrentUser";
 import { invalidate } from "@/lib/invalidate";
 import { queryKeys } from "@/lib/queryKeys";
@@ -60,15 +63,13 @@ type ContentSession={
 };
 type StudioAction={kind:"content_studio_result";sessionId:string;masterDraft:MasterProductDraft;channelResults:GenerateResponse["channel_results"]};
 
-// ---- Auction Slip -> AI Vehicle Intake -----------------------------------
-type AuctionSlipExtraction={
-  auction_source:string|null;lot_number:string|null;stock_number:string|null;vin:string|null;registration:string|null;
-  make:string|null;model:string|null;year:number|null;color:string|null;mileage:number|null;fuel:string|null;
-  transmission:string|null;engine:string|null;purchase_price:number|null;auction_fees:number|null;purchase_date:string|null;
-  missing_information:string[];confidence_notes:string[];
-};
-type AuctionSlipExtractResponse={file_id:string;extraction:AuctionSlipExtraction|null;warning:string|null};
-type AuctionSlipAction={kind:"auction_slip_review";fileId:string;extraction:AuctionSlipExtraction|null;warning:string|null};
+// ---- Scan Auction Slip -> Smart Intake batch review ----------------------
+// One image (or several) can legibly show many vehicles — an auction sheet
+// is usually a table, not a single record — so this now always goes through
+// the same batch staging/review pipeline every module's Scan Image(s) uses
+// (POST /smart-intake/vehicle/extract-images, is_acquisition=true), never a
+// single-vehicle shortcut.
+type AuctionBatchAction={kind:"auction_batch_review";batchId:string;batch:Batch};
 
 function draftTitle(d:ChannelDraft):string{
   return d.payload?.title
@@ -115,7 +116,7 @@ type ChatAction=
   | {kind:"generated_image";fileId:string;productName?:string|null}
   | {kind:"inventory_list";items:{product:string;location?:string;on_hand:number;reserved:number;available:number;status:string}[];label:string}
   | StudioAction
-  | AuctionSlipAction;
+  | AuctionBatchAction;
 
 // previewUrl is a blob: URL, only ever valid for the tab session that
 // created it — optional so a restored (sessionStorage) attachment can carry
@@ -232,103 +233,6 @@ function GeneratedImageCard({fileId,productName,onUse}:{
   </div>;
 }
 
-type AuctionSlipFormState={
-  auction_source:string;lot_number:string;stock_number:string;vin:string;registration:string;
-  make_name:string;model_name:string;year:string;color:string;mileage:string;fuel:string;
-  transmission:string;engine:string;purchase_price:string;auction_fees:string;transport_cost:string;purchase_date:string;
-};
-
-function extractionToForm(extraction:AuctionSlipExtraction|null):AuctionSlipFormState{
-  return {
-    auction_source:extraction?.auction_source||"",lot_number:extraction?.lot_number||"",
-    stock_number:extraction?.stock_number||"",vin:extraction?.vin||"",registration:extraction?.registration||"",
-    make_name:extraction?.make||"",model_name:extraction?.model||"",
-    year:extraction?.year!=null?String(extraction.year):"",color:extraction?.color||"",
-    mileage:extraction?.mileage!=null?String(extraction.mileage):"",fuel:extraction?.fuel||"",
-    transmission:extraction?.transmission||"",engine:extraction?.engine||"",
-    purchase_price:extraction?.purchase_price!=null?String(extraction.purchase_price):"",
-    auction_fees:extraction?.auction_fees!=null?String(extraction.auction_fees):"",
-    transport_cost:"",purchase_date:extraction?.purchase_date||"",
-  };
-}
-
-// "Review Vehicle Intake": pre-filled from AI extraction (or blank if
-// extraction failed/unavailable — the workflow still works, just manual).
-// [Add Vehicle] creates the vehicle as Incoming/In Transit, never silently.
-function AuctionSlipReviewCard({fileId,extraction,warning,onAdded}:{
-  fileId:string;extraction:AuctionSlipExtraction|null;warning:string|null;onAdded:(vehicleName:string)=>void;
-}){
-  const [form,setForm]=useState<AuctionSlipFormState>(()=>extractionToForm(extraction));
-  const [saving,setSaving]=useState(false);
-  const [error,setError]=useState("");
-  const [added,setAdded]=useState<string|null>(null);
-  const missing=extraction?.missing_information||[];
-
-  function set<K extends keyof AuctionSlipFormState>(k:K,v:string){setForm(f=>({...f,[k]:v}));}
-
-  async function submit(e:FormEvent){
-    e.preventDefault();setSaving(true);setError("");
-    try{
-      const vehicle=await apiFetch<{name:string}>("/vehicles/auction-slip/confirm",{method:"POST",body:JSON.stringify({
-        source_document_file_id:fileId,
-        auction_source:form.auction_source||null,lot_number:form.lot_number||null,stock_number:form.stock_number||null,
-        vin:form.vin||null,registration:form.registration||null,make_name:form.make_name||null,model_name:form.model_name||null,
-        year:form.year?Number(form.year):null,color:form.color||null,mileage:form.mileage?Number(form.mileage):null,
-        fuel:form.fuel||null,transmission:form.transmission||null,engine:form.engine||null,
-        purchase_price:form.purchase_price?Number(form.purchase_price):null,
-        auction_fees:form.auction_fees?Number(form.auction_fees):null,
-        transport_cost:form.transport_cost?Number(form.transport_cost):null,
-        purchase_date:form.purchase_date||null,
-      })});
-      setAdded(vehicle.name);
-      onAdded(vehicle.name);
-    }catch(e:any){setError(e?.message||"Unable to add this vehicle.");}
-    finally{setSaving(false);}
-  }
-
-  if(added){
-    return <div className="card" style={{padding:14,marginTop:10,color:"var(--success)"}}>
-      <CheckCircle2 size={14} style={{marginRight:6,verticalAlign:"-2px"}}/>
-      Added <strong>{added}</strong> as Incoming / In Transit. Mark it Received once it physically arrives.
-    </div>;
-  }
-
-  return <div className="card" style={{padding:14,marginTop:10,maxWidth:660}}>
-    <div className="eyebrow">Review Vehicle Intake</div>
-    {warning&&<div className="muted" style={{fontSize:12,marginTop:4}}>{warning}</div>}
-    <form onSubmit={submit}>
-      <div className="form-grid" style={{marginTop:10}}>
-        <Field label="Make" value={form.make_name} onChange={v=>set("make_name",v)}/>
-        <Field label="Model" value={form.model_name} onChange={v=>set("model_name",v)}/>
-        <Field label="Year" type="number" value={form.year} onChange={v=>set("year",v)}/>
-        <Field label="VIN" value={form.vin} onChange={v=>set("vin",v)}/>
-        <Field label="Registration" value={form.registration} onChange={v=>set("registration",v)}/>
-        <Field label="Stock Number" value={form.stock_number} onChange={v=>set("stock_number",v)}/>
-        <Field label="Lot Number" value={form.lot_number} onChange={v=>set("lot_number",v)}/>
-        <Field label="Color" value={form.color} onChange={v=>set("color",v)}/>
-        <Field label="Mileage" type="number" value={form.mileage} onChange={v=>set("mileage",v)}/>
-        <Field label="Fuel" value={form.fuel} onChange={v=>set("fuel",v)}/>
-        <Field label="Transmission" value={form.transmission} onChange={v=>set("transmission",v)}/>
-        <Field label="Engine" value={form.engine} onChange={v=>set("engine",v)}/>
-        <Field label="Auction / Source" value={form.auction_source} onChange={v=>set("auction_source",v)}/>
-        <Field label="Purchase Price" type="number" step="0.01" value={form.purchase_price} onChange={v=>set("purchase_price",v)}/>
-        <Field label="Auction Fees" type="number" step="0.01" value={form.auction_fees} onChange={v=>set("auction_fees",v)}/>
-        <Field label="Transport Cost" type="number" step="0.01" value={form.transport_cost} onChange={v=>set("transport_cost",v)}/>
-        <Field label="Purchase Date" type="date" value={form.purchase_date} onChange={v=>set("purchase_date",v)}/>
-      </div>
-      {missing.length>0&&<div className="muted" style={{fontSize:11,marginTop:10}}>
-        AI couldn't read: {missing.join(", ")} — please fill these in.
-      </div>}
-      {error&&<div style={{color:"var(--danger)",fontSize:12,marginTop:8}}>{error}</div>}
-      <div style={{display:"flex",justifyContent:"flex-end",marginTop:14}}>
-        <button className="btn btn-primary" disabled={saving}>
-          {saving?<><Loader2 size={14} className="spin"/> Adding...</>:"Add Vehicle"}
-        </button>
-      </div>
-    </form>
-  </div>;
-}
-
 function AIPage(){
   const [view,setView]=useState<"chat"|"history">("chat");
   const [historyTab,setHistoryTab]=useState<HistoryTab>("Requests");
@@ -366,6 +270,9 @@ function AIPage(){
   });
   const [composer,setComposer]=useState("");
   const [sending,setSending]=useState(false);
+  const aiProgress=useAIProgress();
+  const abortRef=useRef<AbortController|null>(null);
+  const userCancelledRef=useRef(false);
   const [listening,setListening]=useState(false);
   const [voiceSupported,setVoiceSupported]=useState(false);
   const recognitionRef=useRef<any>(null);
@@ -505,12 +412,18 @@ function AIPage(){
     setMessages(m=>[...m,{id:userMsgId,role:"user",text,attachments:localAttachments,createdAt:new Date().toISOString()}]);
     setAttachedImages([]);
     setSending(true);
+    const controller=new AbortController();
+    abortRef.current=controller;
+    userCancelledRef.current=false;
+    const requestId=newRequestId();
+    aiProgress.start(requestId,images.length>0?"Uploading image…":"Understanding your request…");
     try{
       let fileIds=[...(extraFileIds||[])];
       if(images.length>0){
         const form=new FormData();
         images.forEach(i=>form.append("files",i.file));
         const uploaded=await apiUpload<{files:{file_id:string}[]}>("/ai/chat/uploads",form);
+        if(controller.signal.aborted) throw new Error("Cancelled");
         fileIds=[...fileIds,...uploaded.files.map(f=>f.file_id)];
         setMessages(ms=>ms.map(msg=>msg.id===userMsgId?{
           ...msg,
@@ -526,10 +439,11 @@ function AIPage(){
         }:msg));
       }
 
-      const res=await apiFetch<ChatApiResponse>("/ai/chat",{method:"POST",timeoutMs:AI_CHAT_TIMEOUT_MS,body:JSON.stringify({
+      const res=await apiFetch<ChatApiResponse>("/ai/chat",{method:"POST",timeoutMs:AI_CHAT_TIMEOUT_MS,signal:controller.signal,body:JSON.stringify({
         message:text,
         image_file_ids:fileIds,
         channels:studioChannels,
+        client_request_id:requestId,
       })});
 
       if(res.type==="pending_approval"&&res.approval_id&&res.function){
@@ -564,36 +478,53 @@ function AIPage(){
       apiFetch<AIRequest[]>("/ai-admin/requests?limit=100").then(setRequests).catch(()=>{});
       apiFetch<Approval[]>("/ai-admin/approvals?limit=100").then(setApprovals).catch(()=>{});
     }catch(e:any){
-      pushAssistant(`Sorry — ${e?.message||"something went wrong"}.`,{kind:"error"});
+      if(userCancelledRef.current) pushAssistant("Cancelled. The request may still finish in the background.",{kind:"error"});
+      else pushAssistant(`Sorry — ${e?.message||"something went wrong"}.`,{kind:"error"});
     }finally{
+      aiProgress.stop();
+      abortRef.current=null;
       setSending(false);
     }
+  }
+
+  function cancelSending(){
+    userCancelledRef.current=true;
+    abortRef.current?.abort();
   }
 
   // "Scan Auction Slip" is a dedicated upload+extract call, not a chat tool
   // call — the user shouldn't have to type a prompt to scan a document.
   // Persistence and manual entry both still work if AI extraction fails.
-  async function scanAuctionSlip(file:File){
-    if(scanningSlip)return;
+  async function scanAuctionSlip(files:File[]){
+    if(scanningSlip||files.length===0)return;
     setScanningSlip(true);setError("");
-    const previewUrl=URL.createObjectURL(file);
-    setMessages(m=>[...m,{id:uid(),role:"user",text:"Scan auction slip",attachments:[{previewUrl}],createdAt:new Date().toISOString()}]);
+    const scanRequestId=newRequestId();
+    aiProgress.start(scanRequestId,"Uploading image…");
+    const previewUrl=URL.createObjectURL(files[0]);
+    setMessages(m=>[...m,{
+      id:uid(),role:"user",
+      text:files.length>1?`Scan auction slip (${files.length} images)`:"Scan auction slip",
+      attachments:[{previewUrl}],createdAt:new Date().toISOString(),
+    }]);
     try{
       const form=new FormData();
-      form.append("file",file);
-      const res=await apiFetch<AuctionSlipExtractResponse>("/vehicles/auction-slip/extract",{
+      files.forEach(f=>form.append("files",f));
+      form.append("is_acquisition","true");
+      form.append("client_request_id",scanRequestId);
+      const batch=await apiFetch<Batch>("/smart-intake/vehicle/extract-images",{
         method:"POST",body:form,timeoutMs:AI_CHAT_TIMEOUT_MS,
       });
-      const e=res.extraction;
-      const introText=e
-        ?`I found ${[e.year,e.make,e.model].filter(Boolean).join(" ")||"a vehicle"}`
-          +`${e.vin?`, VIN ${e.vin}`:""}${e.purchase_price!=null?`, purchased for $${e.purchase_price}`:""}. `
-          +"Please review the details before adding it as Incoming."
-        :(res.warning||"I saved the file. Please fill in the vehicle details manually below.");
-      pushAssistant(introText,{kind:"auction_slip_review",fileId:res.file_id,extraction:e,warning:res.warning});
+      const n=batch.items.length;
+      const introText=n===0
+        ?"I couldn't find any readable vehicles in that. Please try again or add one manually."
+        :`I found ${n} vehicle${n===1?"":"s"} (${batch.summary.new??0} new, ${batch.summary.existing??0} existing`
+          +`${batch.summary.possible_duplicate?`, ${batch.summary.possible_duplicate} need review`:""}). `
+          +"Review them below before adding.";
+      pushAssistant(introText,{kind:"auction_batch_review",batchId:batch.id,batch});
     }catch(e:any){
       pushAssistant(`Sorry — ${e?.message||"I couldn't process that file"}.`,{kind:"error"});
     }finally{
+      aiProgress.stop();
       setScanningSlip(false);
     }
   }
@@ -825,20 +756,27 @@ function AIPage(){
                   </button>
                 </div>}
 
-                {msg.action?.kind==="auction_slip_review"&&
-                  <AuctionSlipReviewCard
-                    fileId={msg.action.fileId}
-                    extraction={msg.action.extraction}
-                    warning={msg.action.warning}
-                    onAdded={name=>{
-                      pushAssistant(`${name} was added as Incoming. You'll find it under Vehicles → Incoming / In Transit.`,{kind:"result"});
-                      invalidate(queryClient,["vehicles","inventory","dashboard"]);
-                    }}
-                  />}
+                {msg.action?.kind==="auction_batch_review"&&
+                  <div style={{marginTop:10}}>
+                    <BatchReviewTable
+                      batchId={msg.action.batchId}
+                      initialBatch={msg.action.batch}
+                      onCreated={res=>{
+                        pushAssistant(
+                          `${res.created_count} vehicle${res.created_count===1?"":"s"} added as Incoming / In Transit.`
+                          +(res.skipped_count?` ${res.skipped_count} already existed.`:"")
+                          +" You'll find them under Vehicles → Incoming / In Transit.",
+                          {kind:"result"},
+                        );
+                        invalidate(queryClient,["vehicles","inventory","dashboard"]);
+                      }}
+                    />
+                  </div>}
               </div>
             </div>
           )}
-          {sending&&<div className="ai-msg assistant"><div className="muted" style={{fontSize:13,display:"flex",gap:8,alignItems:"center"}}><Loader2 size={14} className="spin"/>Thinking...</div></div>}
+          {sending&&<div className="ai-msg assistant"><AIProgressIndicator progress={aiProgress.progress} onCancel={cancelSending}/></div>}
+          {scanningSlip&&<div className="ai-msg assistant"><AIProgressIndicator progress={aiProgress.progress}/></div>}
           <div ref={bottomRef}/>
         </div>
       </div>
@@ -889,8 +827,8 @@ function AIPage(){
               <ImagePlus size={16}/>
             </button>
             {(user?.permissions||[]).includes("vehicles.acquisition.manage")&&<>
-              <input ref={auctionSlipInputRef} type="file" accept="image/*,application/pdf" capture="environment" hidden
-                onChange={e=>{const f=e.target.files?.[0];e.target.value="";if(f)scanAuctionSlip(f);}}/>
+              <input ref={auctionSlipInputRef} type="file" accept="image/*,application/pdf" capture="environment" multiple hidden
+                onChange={e=>{const files=Array.from(e.target.files||[]);e.target.value="";if(files.length)scanAuctionSlip(files);}}/>
               <button type="button" className="btn btn-ghost" style={{fontSize:12,padding:"8px 10px",whiteSpace:"nowrap"}}
                 title="Camera / Upload" disabled={scanningSlip} onClick={()=>auctionSlipInputRef.current?.click()}>
                 {scanningSlip?<Loader2 size={15} className="spin"/>:<ScanLine size={15}/>} Scan Auction Slip
